@@ -8,6 +8,8 @@ build = "build.rs"
 
 [dependencies]
 stickdoctor-core = { path = "../stickdoctor-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -23,6 +25,24 @@ windows-sys = { version = "0.59", features = [
     "Win32_Storage_FileSystem",
 ] }
 native-windows-gui = { version = "1.0", default-features = false, features = [
-    "listbox", "list-view", "textbox", "combobox",
-    "notice", "message-window", "frame", "high-dpi", "image-list", "image-decoder",
+    "listbox",
+    "list-view",
+    "textbox",
+    "combobox",
+    "notice",
+    "message-window",
+    "frame",
+    "high-dpi",
+    "image-list",
+    "image-decoder",
+    "file-dialog",
+    "progress-bar",
+    "timer",
+    "clipboard",
 ] }
+[[bin]]
+name = "stickdoctor-app"
+path = "src/main.rs"
+# The binary embeds a requireAdministrator manifest, so its test harness
+# cannot start without UAC. The GUI has no unit tests; the core is tested.
+test = false

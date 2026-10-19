@@ -1,13 +1,16 @@
-#include <windows.h>
+// Self-contained resource script: no <windows.h> include, so rc.exe works
+// without a vcvars environment. Numeric values:
+//   RT_MANIFEST = 24, VOS_NT_WINDOWS32 = 0x40004, VFT_APP = 0x1
 
 1 ICON "stickdoctor.ico"
+
 1 24 "stickdoctor.manifest"
 
 1 VERSIONINFO
-FILEVERSION 0,1,0,0
-PRODUCTVERSION 0,1,0,0
-FILEOS VOS_NT_WINDOWS32
-FILETYPE VFT_APP
+FILEVERSION 0,2,0,0
+PRODUCTVERSION 0,2,0,0
+FILEOS 0x40004
+FILETYPE 0x1
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
@@ -15,11 +18,11 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "Alexandru Stoian"
       VALUE "FileDescription", "StickDoctor - recover USB sticks Windows cannot format"
-      VALUE "FileVersion", "0.1.0"
+      VALUE "FileVersion", "0.2.0"
       VALUE "InternalName", "StickDoctor"
       VALUE "OriginalFilename", "StickDoctor.exe"
       VALUE "ProductName", "StickDoctor"
-      VALUE "ProductVersion", "0.1.0"
+      VALUE "ProductVersion", "0.2.0"
       VALUE "LegalCopyright", "Copyright (C) 2026 Alexandru Stoian. Licensed under GPL-3.0-or-later."
     END
   END

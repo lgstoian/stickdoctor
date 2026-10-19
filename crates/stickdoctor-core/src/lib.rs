@@ -11,7 +11,10 @@ mod win32_const;
 
 pub use enumerate::{enumerate_disks, DiskDevice};
 pub use error::{Error, Result};
-pub use format::{format_volume, verify_volume, volume_root};
+pub use format::{
+    format_progress, format_volume, reset_format_progress, verify_read_write, verify_volume,
+    volume_root,
+};
 pub use layout::{inspect_sector_zero, PartitionEntry, PartitionStyle, SectorZeroInfo};
 pub use log::{LogEvent, LogLevel};
 pub use props::{inspect_properties, BusType, DiskProperties};

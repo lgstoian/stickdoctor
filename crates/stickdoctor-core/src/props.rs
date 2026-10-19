@@ -334,3 +334,42 @@ pub fn read_only_sources() -> Vec<String> {
     }
     sources
 }
+
+#[cfg(test)]
+mod ffi_layout {
+    use super::*;
+    use std::mem::size_of;
+
+    // These sizes are part of the Win32 ABI. A mismatch would silently corrupt
+    // every query, so they are asserted at test time.
+    #[test]
+    fn struct_sizes_match_the_windows_abi() {
+        assert_eq!(size_of::<StoragePropertyQuery>(), 12);
+        assert_eq!(size_of::<StorageDeviceDescriptor>(), 36);
+        assert_eq!(size_of::<DiskLengthInfo>(), 8);
+        assert_eq!(size_of::<StorageDeviceNumber>(), 8);
+    }
+
+    #[test]
+    fn bus_type_mapping() {
+        assert_eq!(bus_type_from_raw(7), BusType::Usb);
+        assert_eq!(bus_type_from_raw(11), BusType::Sata);
+        assert_eq!(bus_type_from_raw(17), BusType::Nvme);
+        assert_eq!(bus_type_from_raw(999), BusType::Unknown);
+    }
+
+    #[test]
+    fn size_helpers() {
+        let p = DiskProperties {
+            bus_type: BusType::Usb,
+            removable: true,
+            writable: true,
+            size_bytes: 32 * 1024 * 1024 * 1024,
+            device_number: Some(3),
+            model: None,
+            serial: None,
+        };
+        assert!((p.size_gib() - 32.0).abs() < 0.001);
+        assert!(p.is_usb());
+    }
+}

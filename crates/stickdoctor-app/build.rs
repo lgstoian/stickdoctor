@@ -1,8 +1,7 @@
 //! Embeds the Windows icon, version info and manifest when a resource compiler
-//! is available. The GNU toolchain shipped by rustup does not include one, so
-//! this script degrades gracefully: the app still builds and runs, and the
-//! resources are added automatically once `rc.exe` (MSVC) or `windres` (MinGW
-//! binutils) is on PATH.
+//! is available. Resolves `rc.exe` from PATH first, then from the Windows SDK
+//! (including the versioned x64 directory), so a plain `cargo build` on a
+//! machine with Visual Studio Build Tools works without `vcvars`.
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -24,7 +23,7 @@ fn main() {
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
 
     if target_env == "msvc" {
-        if let Some(rc) = find_tool("rc.exe") {
+        if let Some(rc) = find_rc() {
             compile_msvc(&rc, &rc_file, &out_dir);
             return;
         }
@@ -51,7 +50,10 @@ fn compile_msvc(rc: &Path, rc_file: &Path, out_dir: &Path) {
     match status {
         Ok(s) if s.success() => {
             println!("cargo:rustc-link-arg={}", res.display());
-            println!("cargo:warning=embedded Windows resources via rc.exe");
+            println!(
+                "cargo:warning=embedded Windows resources via {}",
+                rc.display()
+            );
         }
         other => println!(
             "cargo:warning=rc.exe failed ({:?}); building without resources",
@@ -87,6 +89,39 @@ fn find_tool(name: &str) -> Option<PathBuf> {
             let candidate = dir.join(name);
             if candidate.is_file() {
                 return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Locate `rc.exe`: PATH, then the Windows SDK versioned x64 directories.
+fn find_rc() -> Option<PathBuf> {
+    if let Some(p) = find_tool("rc.exe") {
+        return Some(p);
+    }
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(dir) = env::var("WindowsSdkDir") {
+        roots.push(PathBuf::from(dir));
+    }
+    roots.push(PathBuf::from(r"C:\Program Files (x86)\Windows Kits\10"));
+    roots.push(PathBuf::from(r"C:\Program Files\Windows Kits\10"));
+
+    for root in roots {
+        let bin = root.join("bin");
+        let entries = match std::fs::read_dir(&bin) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let mut versions: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
+        versions.sort();
+        // Newest SDK first.
+        for version in versions.iter().rev() {
+            for arch in ["x64", "x86"] {
+                let candidate = version.join(arch).join("rc.exe");
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
             }
         }
     }

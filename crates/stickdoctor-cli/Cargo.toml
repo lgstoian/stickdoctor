@@ -7,11 +7,11 @@ description.workspace = true
 
 [dependencies]
 stickdoctor-core = { path = "../stickdoctor-core" }
+serde_json = "1"
 windows-sys = { version = "0.59", features = [
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Foundation",
-    "Win32_System_Registry",
     "Win32_UI_Shell",
     "Win32_System_Registry",
     "Win32_System_WindowsProgramming",

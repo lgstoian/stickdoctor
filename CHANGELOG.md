@@ -5,37 +5,50 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-10-19
 
 ### Added
-- Nothing yet.
+- **Post-format read/write test**: after formatting, a 64 KiB file is written,
+  flushed, read back and compared. A failure is reported as a failed repair.
+- **Hotplug detection**: the disk list refreshes automatically when a stick is
+  plugged in or removed.
+- **Live progress bar** driven by the `fmifs` percentage callback plus weighted
+  repair stages.
+- **Rebuild partition table only** option (skips formatting).
+- **Drive-letter fallback**: assigns the first free letter if Windows does not.
+- **CLI `--json`** output for scripting, plus `--rebuild-only`.
+- **Settings persistence**: filesystem, label and options are remembered in
+  `%APPDATA%\StickDoctor\config.json`.
+- **Copy log** button.
+- Embedded Windows icon, version information and a `requireAdministrator`
+  manifest when built with the MSVC toolchain.
+- `SECURITY.md` and `docs/SECURITY.md` with the threat model and audit results.
+- `cargo-audit` and `cargo-deny` in CI with a reviewed policy.
 
-## [0.1.0] - 2026-10-19
+### Security
+- `diskpart.exe` and `format.com` are now resolved from `%SystemRoot%\System32`,
+  preventing binary planting in the current directory or PATH (S1).
+- `fmifs.dll` is loaded with `LoadLibraryExW` and
+  `LOAD_LIBRARY_SEARCH_SYSTEM32`, preventing DLL search-order hijacking (S2).
+- The diskpart script is passed on stdin instead of a predictable temporary
+  file, removing a symlink/TOCTOU vector (S3).
+- The log is saved through a user-chosen path instead of a predictable temp
+  file (S4).
+- Added compile-time assertions for the Win32 ABI struct sizes.
 
-### Added
-- Native Windows GUI (`StickDoctor.exe`) and a CLI (`StickDoctorCLI.exe`).
-- Physical disk enumeration with bus type, size, model, partition style and
-  safety status.
-- Diagnosis of MBR / GPT / isohybrid / blank layouts, including a plain-English
-  explanation of why Windows refuses to format the stick.
-- Repair pipeline: unmount volumes, remove the old partition table, create a
-  primary partition, format, then **verify the filesystem really exists**.
-- Filesystem choice: FAT32, exFAT, NTFS; quick or full format; optional raw
-  zeroing of the first and last 1 MiB.
-- Formatting tries `fmifs.dll!FormatEx` first, then `diskpart`, then
-  `format.com`, and reports the error from each attempt.
-- Safety gate that refuses the Windows system disk and any non-USB disk, checked
-  both in the UI and inside the repair engine.
-- CLI `--dry-run`, `--yes`, `--zero`, `--help`, `--version`.
-- Unit tests for the MBR/GPT/isohybrid parsers and the volume-extent decoder.
+### Changed
+- The GUI was rebuilt around a table view with clear steps, a details pane, a
+  progress bar and result feedback.
+- `enumerate_usb_disks` was renamed to `enumerate_disks` (it never filtered USB).
 
 ### Fixed
-- Volume-to-disk mapping read `NumberOfDiskExtents` instead of `DiskNumber`,
-  so volumes were never matched on disks other than disk 1. This meant volumes
-  were not unmounted before repair.
-- Verification reported success as soon as a drive letter appeared, even when no
-  filesystem had been written. Success is now defined by reading the filesystem
-  back and comparing it to the requested one.
-- `diskpart` error detection relied on English output strings. Decisions no
-  longer depend on locale.
-- The "zero first/last 1 MiB" option was accepted by the UI but never executed.
+- Volume-to-disk mapping read `NumberOfDiskExtents` instead of `DiskNumber`, so
+  volumes were never matched on disks other than disk 1 and nothing was
+  unmounted before repair.
+- Verification reported success as soon as a drive letter appeared, even when
+  no filesystem had been written. Success now requires reading the filesystem
+  back and comparing it.
+- Formatting failures are no longer inferred from English `diskpart` strings;
+  success is defined by independent verification.
+- The "zero first/last 1 MiB" option is now actually executed.
+- Volume locking uses the `\\.\E:` device path required by `FSCTL_LOCK_VOLUME`.

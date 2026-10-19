@@ -5,7 +5,7 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "GPL-3.0-or-later"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Alexandru Stoian"]
 description = "Recover USB sticks that Windows can no longer format after writing a raw image"
 repository = "https://github.com/lgstoian/stickdoctor"

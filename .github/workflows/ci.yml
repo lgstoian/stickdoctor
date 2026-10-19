@@ -31,3 +31,13 @@ jobs:
 
       - name: Release build
         run: cargo build --release
+
+      - name: Security audit (RustSec)
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Dependency policy (cargo-deny)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

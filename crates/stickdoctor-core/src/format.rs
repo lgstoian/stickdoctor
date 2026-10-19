@@ -5,19 +5,43 @@ use crate::volumes::VolumeInfo;
 use crate::win32_const::{FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, FSCTL_UNLOCK_VOLUME};
 use crate::SharedLog;
 use std::cell::RefCell;
+use std::io::Write;
 use std::mem;
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::ptr;
+use std::sync::atomic::{AtomicU8, Ordering};
 use windows_sys::Win32::Foundation::{
     CloseHandle, FreeLibrary, GENERIC_READ, GENERIC_WRITE, HMODULE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
-use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows_sys::Win32::System::LibraryLoader::{
+    GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
+};
 use windows_sys::Win32::System::IO::DeviceIoControl;
+
+/// Absolute path to a system tool, so the Windows search order cannot be
+/// hijacked by a binary planted in the current directory or on PATH.
+fn system32(name: &str) -> PathBuf {
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+    PathBuf::from(root).join("System32").join(name)
+}
 
 /// Media type passed to fmifs FormatEx. USB sticks report removable media.
 const FMIFS_REMOVABLE_MEDIA: u32 = 11;
+
+/// Live percentage reported by fmifs while formatting (0..=100).
+static FORMAT_PROGRESS: AtomicU8 = AtomicU8::new(0);
+
+pub fn format_progress() -> u8 {
+    FORMAT_PROGRESS.load(Ordering::Relaxed)
+}
+
+pub fn reset_format_progress() {
+    FORMAT_PROGRESS.store(0, Ordering::Relaxed);
+}
 
 thread_local! {
     static FORMAT_LOG: RefCell<Option<SharedLog>> = const { RefCell::new(None) };
@@ -125,6 +149,34 @@ pub fn verify_volume(root: &str, expected: &str, log: &SharedLog) -> Result<()> 
     Err(Error::Internal(last_error))
 }
 
+/// Write a small file, flush it, read it back and compare. This proves the
+/// formatted filesystem is actually usable on the device, not just present in
+/// the partition table.
+pub fn verify_read_write(root: &str, log: &SharedLog) -> Result<()> {
+    let file = std::path::Path::new(root).join("stickdoctor-test.tmp");
+    let data: Vec<u8> = (0..64 * 1024usize).map(|i| (i % 251) as u8).collect();
+
+    std::fs::write(&file, &data).map_err(|e| Error::Internal(format!("write test failed: {e}")))?;
+    {
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&file)
+            .map_err(|e| Error::Internal(format!("reopen for flush failed: {e}")))?;
+        f.sync_all()
+            .map_err(|e| Error::Internal(format!("flush failed: {e}")))?;
+    }
+    let read =
+        std::fs::read(&file).map_err(|e| Error::Internal(format!("read-back failed: {e}")))?;
+    let _ = std::fs::remove_file(&file);
+
+    if read != data {
+        return Err(Error::Internal(
+            "read/write test mismatch: the formatted volume may be failing".into(),
+        ));
+    }
+    note(log, LogLevel::Success, "Read/write test passed (64 KiB)");
+    Ok(())
+}
 fn read_volume(root: &str) -> Result<(String, String)> {
     use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationW;
     let wide: Vec<u16> = root.encode_utf16().chain(std::iter::once(0)).collect();
@@ -195,6 +247,10 @@ unsafe extern "system" fn format_callback(
     data: *mut std::ffi::c_void,
 ) -> i32 {
     // action 1 = OutputMsg (wide string), action 2 = PercentDone (data is a DWORD*)
+    if action == 2 && !data.is_null() {
+        let pct = unsafe { *(data as *const u32) } as u8;
+        FORMAT_PROGRESS.store(pct.min(100), Ordering::Relaxed);
+    }
     if action == 1 && !data.is_null() {
         let p = data as *const u16;
         let mut len = 0usize;
@@ -223,10 +279,23 @@ fn format_with_fmifs(
     quick: bool,
     log: &SharedLog,
 ) -> Result<()> {
-    let dll = encode_wide("fmifs.dll");
-    let hmod: HMODULE = unsafe { LoadLibraryW(dll.as_ptr()) };
+    // Load fmifs.dll from System32 only. LOAD_LIBRARY_SEARCH_SYSTEM32 stops a
+    // planted DLL next to the executable from loading into this elevated
+    // process.
+    let dll_path = system32("fmifs.dll");
+    let dll = encode_wide(&dll_path.to_string_lossy());
+    let hmod: HMODULE = unsafe {
+        LoadLibraryExW(
+            dll.as_ptr(),
+            std::ptr::null_mut(),
+            LOAD_LIBRARY_SEARCH_SYSTEM32,
+        )
+    };
     if hmod.is_null() {
-        return Err(Error::Internal("fmifs.dll not found".into()));
+        return Err(Error::Internal(format!(
+            "cannot load {}",
+            dll_path.display()
+        )));
     }
 
     let proc = unsafe { GetProcAddress(hmod, c"FormatEx".as_ptr() as *const u8) };
@@ -363,14 +432,13 @@ fn format_with_diskpart(volume: &VolumeInfo, fs: FsChoice, label: &str, quick: b
 // ------------------------------------------------------------ format.com
 
 fn format_with_format_com(root: &str, fs: FsChoice, label: &str, quick: bool) -> Result<()> {
-    use std::process::Command;
     let drive = format!("{}:", root.chars().next().unwrap_or('E'));
     let fs_arg = match fs {
         FsChoice::Fat32 => "FAT32",
         FsChoice::ExFat => "exFAT",
         FsChoice::Ntfs => "NTFS",
     };
-    let mut cmd = Command::new("format.com");
+    let mut cmd = Command::new(system32("format.com"));
     cmd.arg(&drive).arg(format!("/FS:{}", fs_arg)).arg("/Y");
     if quick {
         cmd.arg("/Q");
@@ -387,13 +455,30 @@ fn format_with_format_com(root: &str, fs: FsChoice, label: &str, quick: bool) ->
     Ok(())
 }
 
+/// Run a diskpart script supplied on stdin.
+///
+/// No temporary file is written: the script never touches the filesystem, which
+/// removes the symlink/TOCTOU risk of a predictable temp path. diskpart.exe is
+/// resolved from System32 so a planted binary cannot hijack the elevated
+/// process.
 pub fn run_diskpart(script: &str) -> Result<String> {
-    use std::process::Command;
-    let path = std::env::temp_dir().join(format!("stickdoctor_{}.txt", std::process::id()));
-    std::fs::write(&path, script).map_err(Error::Io)?;
-    let out = Command::new("diskpart").arg("/s").arg(&path).output();
-    let _ = std::fs::remove_file(&path);
-    let out = out.map_err(Error::Io)?;
+    let mut child = Command::new(system32("diskpart.exe"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(Error::Io)?;
+
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| Error::Internal("cannot open diskpart stdin".into()))?;
+        stdin.write_all(script.as_bytes()).map_err(Error::Io)?;
+        // Dropping `stdin` here closes the pipe and signals EOF.
+    }
+
+    let out = child.wait_with_output().map_err(Error::Io)?;
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     let combined = format!("{}\n{}", stdout, stderr);

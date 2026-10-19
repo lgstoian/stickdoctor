@@ -54,6 +54,8 @@ pub struct RepairOptions {
     pub label: String,
     pub quick: bool,
     pub zero_sectors: bool,
+    /// Only rebuild the partition table; skip formatting.
+    pub rebuild_only: bool,
 }
 
 impl Default for RepairOptions {
@@ -63,15 +65,16 @@ impl Default for RepairOptions {
             label: String::new(),
             quick: true,
             zero_sectors: false,
+            rebuild_only: false,
         }
     }
 }
 
 /// Progress callback used by the GUI so it can show a live status line.
-pub type StageCallback = dyn Fn(&str) + Send + Sync;
+pub type StageCallback = dyn Fn(&str, u8) + Send + Sync;
 
 pub fn execute_repair(index: u32, opts: &RepairOptions, log: &SharedLog) -> Result<()> {
-    execute_repair_with_progress(index, opts, log, &|_| {})
+    execute_repair_with_progress(index, opts, log, &|_, _| {})
 }
 
 /// Full repair pipeline. Every stage verifies its own outcome; success is only
@@ -100,7 +103,7 @@ pub fn execute_repair_with_progress(
     );
 
     // ---- 1. unmount anything mounted on the disk ----
-    on_stage("Unmounting volumes...");
+    on_stage("Unmounting volumes...", 10);
     let (locked, dismounted) = crate::volumes::lock_dismount_all(index)?;
     note(
         log,
@@ -113,18 +116,19 @@ pub fn execute_repair_with_progress(
 
     // ---- 2. optional raw wipe of the signature areas ----
     if opts.zero_sectors {
-        on_stage("Zeroing first/last 1 MiB...");
+        on_stage("Zeroing first/last 1 MiB...", 18);
         zero_signature_areas(index, props.size_bytes, log)?;
     }
 
     // ---- 3. rebuild the partition table ----
-    on_stage("Rebuilding partition table...");
+    on_stage("Removing old partition table...", 26);
     delete_layout(index, log)?;
+    on_stage("Creating partition...", 34);
     create_partition(index, log)?;
 
     // ---- 4. wait for the new volume ----
-    on_stage("Waiting for the new volume...");
-    let volume = match crate::volumes::wait_for_volume(index, 25) {
+    on_stage("Waiting for the new volume...", 42);
+    let mut volume = match crate::volumes::wait_for_volume(index, 25) {
         Some(v) => v,
         None => {
             let msg = "The partition was created but Windows did not expose a volume. \
@@ -133,6 +137,22 @@ pub fn execute_repair_with_progress(
             return Err(Error::Internal(msg.into()));
         }
     };
+
+    // If Windows created the volume without a letter, assign one ourselves.
+    if volume.drive_letter.is_none() {
+        on_stage("Assigning a drive letter...", 46);
+        if let Err(e) = assign_free_letter(index, log) {
+            note(
+                log,
+                crate::log::LogLevel::Warn,
+                &format!("Could not assign a drive letter: {}", e),
+            );
+        }
+        if let Some(v) = crate::volumes::wait_for_volume(index, 10) {
+            volume = v;
+        }
+    }
+
     note(
         log,
         crate::log::LogLevel::Success,
@@ -146,22 +166,65 @@ pub fn execute_repair_with_progress(
         ),
     );
 
+    if opts.rebuild_only {
+        note(
+            log,
+            crate::log::LogLevel::Success,
+            "Partition table rebuilt. Formatting skipped (rebuild-only mode).",
+        );
+        on_stage("Done.", 100);
+        return Ok(());
+    }
+
     // ---- 5. format ----
     let label = sanitize_label(&opts.label);
-    on_stage(&format!("Formatting as {}...", opts.fs));
+    on_stage(&format!("Formatting as {}...", opts.fs), 52);
+    format::reset_format_progress();
     format::format_volume(&volume, opts.fs, &label, opts.quick, log)?;
 
     // ---- 6. verify the filesystem really exists ----
-    on_stage("Verifying...");
+    on_stage("Verifying filesystem...", 88);
     let root = format::volume_root(&volume)?;
     format::verify_volume(&root, opts.fs.fmifs_name(), log)?;
+
+    // ---- 7. prove the volume can actually store data ----
+    on_stage("Testing read/write...", 94);
+    format::verify_read_write(&root, log)?;
 
     note(
         log,
         crate::log::LogLevel::Success,
         &format!("Repair complete. {} is ready ({}).", root, opts.fs),
     );
-    on_stage("Done.");
+    on_stage("Done.", 100);
+    Ok(())
+}
+
+/// Assign the first free drive letter (E..Z) to partition 1 of the disk.
+fn assign_free_letter(index: u32, log: &SharedLog) -> Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
+    let mask = unsafe { GetLogicalDrives() };
+    let mut letter = None;
+    for i in 4..26u32 {
+        if mask & (1 << i) == 0 {
+            letter = Some((b'A' + i as u8) as char);
+            break;
+        }
+    }
+    let letter = match letter {
+        Some(l) => l,
+        None => return Err(Error::Internal("no free drive letter available".into())),
+    };
+    let script = format!(
+        "select disk {}\nselect partition 1\nassign letter={}\n",
+        index, letter
+    );
+    let out = format::run_diskpart(&script)?;
+    note(
+        log,
+        crate::log::LogLevel::Info,
+        &format!("Assigned drive letter {}: {}", letter, out.trim()),
+    );
     Ok(())
 }
 

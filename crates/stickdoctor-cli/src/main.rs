@@ -10,7 +10,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     match args.first().map(|s| s.as_str()) {
-        None | Some("list") => cmd_list(),
+        None | Some("list") => cmd_list(&args),
         Some("repair") => cmd_repair(&args[1..]),
         Some("--version") | Some("-V") => {
             println!("stickdoctor {}", VERSION);
@@ -32,27 +32,28 @@ fn print_help() {
     println!(
         "stickdoctor {}\n\n\
          Usage:\n  \
-         stickdoctor-cli                    List physical disks\n  \
-         stickdoctor-cli list               List physical disks\n  \
+         stickdoctor-cli [list] [--json]      List physical disks\n  \
          stickdoctor-cli repair <N> [fs] [label] [options]\n\n\
          Arguments:\n  \
          <N>       Physical drive number (see `list`)\n  \
          [fs]      fat32 | exfat | ntfs   (default: fat32)\n  \
          [label]   Volume label, max 11 chars (default: STICK)\n\n\
          Options:\n  \
-         --yes     Skip the confirmation prompt\n  \
-         --zero    Zero the first/last 1 MiB before rebuilding (stubborn sticks)\n  \
-         --dry-run Show what would happen, change nothing\n\n\
+         --json            Machine-readable output (list)\n  \
+         --yes             Skip the confirmation prompt\n  \
+         --zero            Zero the first/last 1 MiB before rebuilding\n  \
+         --rebuild-only    Only rebuild the partition table, do not format\n  \
+         --dry-run         Show what would happen, change nothing\n\n\
          Examples:\n  \
+         stickdoctor-cli list --json\n  \
          stickdoctor-cli repair 3 fat32 MYSTICK\n  \
          stickdoctor-cli repair 3 exfat MYSTICK --yes\n",
         VERSION
     );
 }
 
-fn cmd_list() -> ExitCode {
-    println!("StickDoctor {} - physical disks\n", VERSION);
-
+fn cmd_list(args: &[String]) -> ExitCode {
+    let json = args.iter().any(|a| a == "--json");
     let devices = match enumerate_disks() {
         Ok(d) => d,
         Err(e) => {
@@ -61,7 +62,38 @@ fn cmd_list() -> ExitCode {
         }
     };
 
-    if devices.is_empty() {
+    let candidates: Vec<DiskCandidate> = devices.iter().map(DiskCandidate::probe).collect();
+
+    if json {
+        let disks: Vec<serde_json::Value> = candidates
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "index": c.device.drive_index,
+                    "bus": c.properties.bus_type.to_string(),
+                    "size_bytes": c.properties.size_bytes,
+                    "size_gib": (c.properties.size_gib() * 10.0).round() / 10.0,
+                    "removable": c.properties.removable,
+                    "writable": c.properties.writable,
+                    "model": c.properties.model,
+                    "serial": c.properties.serial,
+                    "partition_style": c.sector_zero.as_ref().map(|s| s.style.to_string()),
+                    "safety": c.safety.label(),
+                    "can_repair": c.can_repair(),
+                    "volumes": c.volumes.iter().map(|v| serde_json::json!({
+                        "letter": v.drive_letter,
+                        "filesystem": v.filesystem,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let doc = serde_json::json!({ "version": VERSION, "disks": disks });
+        println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+        return ExitCode::SUCCESS;
+    }
+
+    println!("StickDoctor {} - physical disks\n", VERSION);
+    if candidates.is_empty() {
         println!("No disks found. Run this program as Administrator.");
         return ExitCode::SUCCESS;
     }
@@ -69,9 +101,8 @@ fn cmd_list() -> ExitCode {
     println!("IDX  BUS     SIZE        SAFETY      MODEL                       LAYOUT");
     println!("{}", "-".repeat(104));
 
-    for dev in &devices {
-        let c = DiskCandidate::probe(dev);
-        let index = dev.drive_index.unwrap_or(0);
+    for c in &candidates {
+        let index = c.device.drive_index.unwrap_or(0);
         let layout = c
             .sector_zero
             .as_ref()
@@ -112,6 +143,7 @@ fn cmd_repair(args: &[String]) -> ExitCode {
     let positionals: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
     let assume_yes = args.iter().any(|a| a == "--yes");
     let zero = args.iter().any(|a| a == "--zero");
+    let rebuild_only = args.iter().any(|a| a == "--rebuild-only");
     let dry_run = args.iter().any(|a| a == "--dry-run");
 
     let index: u32 = match positionals.first().and_then(|s| s.parse().ok()) {
@@ -141,6 +173,7 @@ fn cmd_repair(args: &[String]) -> ExitCode {
         label,
         quick: true,
         zero_sectors: zero,
+        rebuild_only,
     };
 
     let props = match inspect_properties(index) {
@@ -152,13 +185,13 @@ fn cmd_repair(args: &[String]) -> ExitCode {
         }
     };
 
-    println!("Disk:   PhysicalDrive{}", index);
+    println!("Disk:    PhysicalDrive{}", index);
     println!(
-        "Model:  {}",
+        "Model:   {}",
         props.model.clone().unwrap_or_else(|| "Unknown".into())
     );
-    println!("Bus:    {}", props.bus_type);
-    println!("Size:   {:.2} GiB", props.size_gib());
+    println!("Bus:     {}", props.bus_type);
+    println!("Size:    {:.2} GiB", props.size_gib());
     println!(
         "Writable: {}",
         if props.writable {
@@ -167,10 +200,21 @@ fn cmd_repair(args: &[String]) -> ExitCode {
             "NO (write-protected)"
         }
     );
-    println!("Target: {}", fs);
+    println!(
+        "Action:  {}",
+        if rebuild_only {
+            "rebuild partition table only".to_string()
+        } else {
+            format!("format as {}", fs)
+        }
+    );
 
-    if let Some(warn) = fs.warn_for_size(props.size_gib()) {
-        eprintln!("\nWARNING: {}", warn);
+    if !rebuild_only {
+        if let Some(warn) = fs.warn_for_size(props.size_gib()) {
+            if fs == FsChoice::Fat32 {
+                eprintln!("\nWARNING: {}", warn);
+            }
+        }
     }
 
     if dry_run {
@@ -195,7 +239,7 @@ fn cmd_repair(args: &[String]) -> ExitCode {
 
     match result {
         Ok(()) => {
-            println!("\nDone. The stick is formatted and should appear in Explorer.");
+            println!("\nDone.");
             ExitCode::SUCCESS
         }
         Err(e) => {
