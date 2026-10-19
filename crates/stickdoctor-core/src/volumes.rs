@@ -33,6 +33,33 @@ pub fn drive_letters() -> Vec<String> {
         .map(|i| format!("{}:", (b'A' + i as u8) as char))
         .collect()
 }
+/// Snapshot of every registered volume's device path (`\\?\Volume{...}\`).
+pub fn all_volume_paths() -> Vec<String> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FindFirstVolumeW, FindNextVolumeW, FindVolumeClose,
+    };
+    let mut result = Vec::new();
+    let mut buf = vec![0u16; 512];
+    let h = unsafe { FindFirstVolumeW(buf.as_mut_ptr(), buf.len() as u32) };
+    if h == INVALID_HANDLE_VALUE {
+        return result;
+    }
+    loop {
+        let name = OsString::from_wide(&buf)
+            .to_string_lossy()
+            .trim_end_matches('\0')
+            .to_string();
+        if !name.is_empty() {
+            result.push(name);
+        }
+        let ok = unsafe { FindNextVolumeW(h, buf.as_mut_ptr(), buf.len() as u32) };
+        if ok == 0 {
+            break;
+        }
+    }
+    unsafe { FindVolumeClose(h) };
+    result
+}
 pub fn disk_volumes(target_disk_index: u32) -> Result<Vec<VolumeInfo>> {
     let mut result = Vec::new();
     use windows_sys::Win32::Storage::FileSystem::{
@@ -80,7 +107,7 @@ pub fn wait_for_volume(target_disk_index: u32, attempts: u32) -> Option<VolumeIn
     None
 }
 
-fn first_drive_letter(volume_name: &str) -> Option<String> {
+pub fn first_drive_letter(volume_name: &str) -> Option<String> {
     use windows_sys::Win32::Storage::FileSystem::GetVolumePathNamesForVolumeNameW;
     let wide: Vec<u16> = volume_name
         .encode_utf16()

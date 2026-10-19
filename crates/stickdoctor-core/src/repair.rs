@@ -136,23 +136,48 @@ pub fn execute_repair_with_progress(
     create_partition(index, props.size_bytes, log)?;
 
     // ---- 4. wait for the new volume ----
+    let pre_volumes: std::collections::HashSet<String> =
+        crate::volumes::all_volume_paths().into_iter().collect();
     let pre_letters = crate::volumes::drive_letters();
     on_stage("Waiting for the new volume...", 42);
     let mut volume: Option<crate::volumes::VolumeInfo> = None;
     for attempt in 0..40 {
         let vols = crate::volumes::disk_volumes(index).unwrap_or_default();
+        let all_paths = crate::volumes::all_volume_paths();
         note(
             log,
             crate::log::LogLevel::Info,
             &format!(
-                "wait attempt {}: {} volume(s) on disk, {} total letters",
+                "wait attempt {}: {} volume(s) on disk, {} total volumes: [{}]",
                 attempt + 1,
                 vols.len(),
-                crate::volumes::drive_letters().len()
+                all_paths.len(),
+                all_paths.join(" | ")
             ),
         );
         if let Some(v) = vols.into_iter().next() {
             volume = Some(v);
+            break;
+        }
+        // GUID-diff fallback: a volume that did not exist before repair.
+        let now_paths = crate::volumes::all_volume_paths();
+        if let Some(path) = now_paths.iter().find(|p| !pre_volumes.contains(*p)) {
+            note(
+                log,
+                crate::log::LogLevel::Warn,
+                &format!(
+                    "wait attempt {}: new volume detected: {}",
+                    attempt + 1,
+                    path
+                ),
+            );
+            let letter = crate::volumes::first_drive_letter(path);
+            let fs = crate::volumes::probe_filesystem(path);
+            volume = Some(crate::volumes::VolumeInfo {
+                device_path: path.clone(),
+                drive_letter: letter,
+                filesystem: fs,
+            });
             break;
         }
         // Diff-based fallback: a drive letter that did not exist before.
