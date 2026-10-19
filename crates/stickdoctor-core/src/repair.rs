@@ -176,7 +176,7 @@ pub fn execute_repair_with_progress(
             });
             break;
         }
-        if attempt == 8 || attempt == 18 || attempt == 28 {
+        if attempt % 5 == 4 {
             let _ = format::run_diskpart(&format!("select disk {}\nrescan\n", index));
         }
         std::thread::sleep(std::time::Duration::from_millis(400));
@@ -381,6 +381,25 @@ fn create_partition(index: u32, disk_size: u64, log: &SharedLog) -> Result<()> {
             crate::log::LogLevel::Warn,
             &format!("DiskPart reported an error: {}. Trying fallbacks.", e),
         ),
+    }
+
+    // Force the mount manager to re-read the partition table. DiskPart's
+    // `rescan` is not always enough for a freshly created partition.
+    if let Ok(h) = open_drive(index) {
+        let mut returned = 0u32;
+        let _ = unsafe {
+            DeviceIoControl(
+                h,
+                windows_sys::Win32::System::Ioctl::IOCTL_DISK_UPDATE_PROPERTIES,
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                0,
+                &mut returned,
+                ptr::null_mut(),
+            )
+        };
+        unsafe { CloseHandle(h) };
     }
 
     if partition_exists(index) {
