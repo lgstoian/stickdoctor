@@ -136,30 +136,45 @@ pub fn execute_repair_with_progress(
     create_partition(index, props.size_bytes, log)?;
 
     // ---- 4. wait for the new volume ----
+    let pre_letters = crate::volumes::drive_letters();
     on_stage("Waiting for the new volume...", 42);
     let mut volume: Option<crate::volumes::VolumeInfo> = None;
     for attempt in 0..40 {
-        match crate::volumes::disk_volumes(index) {
-            Ok(vols) => {
-                note(
-                    log,
-                    crate::log::LogLevel::Info,
-                    &format!(
-                        "wait attempt {}: {} volume(s) on disk",
-                        attempt + 1,
-                        vols.len()
-                    ),
-                );
-                if let Some(v) = vols.into_iter().next() {
-                    volume = Some(v);
-                    break;
-                }
-            }
-            Err(e) => note(
+        let vols = crate::volumes::disk_volumes(index).unwrap_or_default();
+        note(
+            log,
+            crate::log::LogLevel::Info,
+            &format!(
+                "wait attempt {}: {} volume(s) on disk, {} total letters",
+                attempt + 1,
+                vols.len(),
+                crate::volumes::drive_letters().len()
+            ),
+        );
+        if let Some(v) = vols.into_iter().next() {
+            volume = Some(v);
+            break;
+        }
+        // Diff-based fallback: a drive letter that did not exist before.
+        let now = crate::volumes::drive_letters();
+        if let Some(letter) = now.iter().find(|l| !pre_letters.contains(l)) {
+            note(
                 log,
                 crate::log::LogLevel::Warn,
-                &format!("wait attempt {}: {}", attempt + 1, e),
-            ),
+                &format!(
+                    "wait attempt {}: new drive letter {} detected",
+                    attempt + 1,
+                    letter
+                ),
+            );
+            let root = format!("{}\\", letter);
+            let fs = crate::volumes::probe_filesystem(&root);
+            volume = Some(crate::volumes::VolumeInfo {
+                device_path: format!(r"\\.\{}", letter),
+                drive_letter: Some(letter.clone()),
+                filesystem: fs,
+            });
+            break;
         }
         if attempt == 8 || attempt == 18 || attempt == 28 {
             let _ = format::run_diskpart(&format!("select disk {}\nrescan\n", index));

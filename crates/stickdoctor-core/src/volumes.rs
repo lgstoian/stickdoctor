@@ -24,6 +24,15 @@ pub struct VolumeInfo {
 }
 
 /// Enumerate volumes and map them back to a physical drive index.
+/// Snapshot of the drive letters currently in use (A-Z).
+pub fn drive_letters() -> Vec<String> {
+    use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
+    let mask = unsafe { GetLogicalDrives() };
+    (0..26u32)
+        .filter(|i| mask & (1 << i) != 0)
+        .map(|i| format!("{}:", (b'A' + i as u8) as char))
+        .collect()
+}
 pub fn disk_volumes(target_disk_index: u32) -> Result<Vec<VolumeInfo>> {
     let mut result = Vec::new();
     use windows_sys::Win32::Storage::FileSystem::{
@@ -59,37 +68,6 @@ pub fn disk_volumes(target_disk_index: u32) -> Result<Vec<VolumeInfo>> {
 }
 
 /// Wait until a volume appears on the disk (used after creating a partition).
-/// Enumerate every volume on the system, without filtering by disk.
-pub fn all_volumes() -> Result<Vec<VolumeInfo>> {
-    let mut result = Vec::new();
-    use windows_sys::Win32::Storage::FileSystem::{
-        FindFirstVolumeW, FindNextVolumeW, FindVolumeClose,
-    };
-    let mut buf = vec![0u16; 512];
-    let h = unsafe { FindFirstVolumeW(buf.as_mut_ptr(), buf.len() as u32) };
-    if h == INVALID_HANDLE_VALUE {
-        return Err(crate::error::last_error());
-    }
-    loop {
-        let name = OsString::from_wide(&buf)
-            .to_string_lossy()
-            .trim_end_matches('\0')
-            .to_string();
-        if !name.is_empty() {
-            result.push(VolumeInfo {
-                drive_letter: first_drive_letter(&name),
-                filesystem: probe_filesystem(&name),
-                device_path: name,
-            });
-        }
-        let ok = unsafe { FindNextVolumeW(h, buf.as_mut_ptr(), buf.len() as u32) };
-        if ok == 0 {
-            break;
-        }
-    }
-    unsafe { FindVolumeClose(h) };
-    Ok(result)
-}
 pub fn wait_for_volume(target_disk_index: u32, attempts: u32) -> Option<VolumeInfo> {
     for _ in 0..attempts {
         if let Ok(vols) = disk_volumes(target_disk_index) {
@@ -217,7 +195,7 @@ pub(crate) fn parse_extent_disks(buf: &[u8]) -> Vec<u32> {
     disks
 }
 
-fn probe_filesystem(volume_name: &str) -> Option<String> {
+pub fn probe_filesystem(volume_name: &str) -> Option<String> {
     use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationW;
     let wide: Vec<u16> = volume_name
         .encode_utf16()
