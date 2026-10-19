@@ -7,7 +7,7 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, WriteFile, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, FlushFileBuffers, WriteFile, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::Ioctl::IOCTL_DISK_DELETE_DRIVE_LAYOUT;
 use windows_sys::Win32::System::IO::DeviceIoControl;
@@ -124,7 +124,7 @@ pub fn execute_repair_with_progress(
     on_stage("Removing old partition table...", 26);
     delete_layout(index, log)?;
     on_stage("Creating partition...", 34);
-    create_partition(index, log)?;
+    create_partition(index, props.size_bytes, log)?;
 
     // ---- 4. wait for the new volume ----
     on_stage("Waiting for the new volume...", 42);
@@ -257,35 +257,26 @@ fn safety_or_refuse(index: u32, props: &DiskProperties, log: &SharedLog) -> Resu
     }
 }
 
-/// Remove the existing partition table with an ioctl (locale-independent).
-/// Falls back to `diskpart clean` when the ioctl is refused.
+/// Invalidate the existing layout with an ioctl. This is only a best-effort
+/// pre-step: `DELETE_DRIVE_LAYOUT` does not update DiskPart/VDS's own view of
+/// the disk, so the authoritative reset is `diskpart clean` in `create_partition`.
 fn delete_layout(index: u32, log: &SharedLog) -> Result<()> {
     match ioctl_delete_layout(index) {
-        Ok(()) => {
-            note(
-                log,
-                crate::log::LogLevel::Success,
-                "Partition table removed (ioctl)",
-            );
-            Ok(())
-        }
-        Err(e) => {
-            note(
-                log,
-                crate::log::LogLevel::Warn,
-                &format!("ioctl clean failed ({}); falling back to diskpart", e),
-            );
-            let script = format!("select disk {}\nclean\n", index);
-            let out = format::run_diskpart(&script)?;
-            note(
-                log,
-                crate::log::LogLevel::Success,
-                "Partition table removed (diskpart)",
-            );
-            note(log, crate::log::LogLevel::Info, out.trim());
-            Ok(())
-        }
+        Ok(()) => note(
+            log,
+            crate::log::LogLevel::Success,
+            "Partition table invalidated (ioctl)",
+        ),
+        Err(e) => note(
+            log,
+            crate::log::LogLevel::Warn,
+            &format!(
+                "ioctl invalidation failed ({}); DiskPart clean will handle it",
+                e
+            ),
+        ),
     }
+    Ok(())
 }
 
 fn ioctl_delete_layout(index: u32) -> Result<()> {
@@ -316,18 +307,283 @@ fn ioctl_delete_layout(index: u32) -> Result<()> {
 }
 
 /// Create one primary partition and assign a drive letter.
-fn create_partition(index: u32, log: &SharedLog) -> Result<()> {
+///
+/// `diskpart clean` must run in the same DiskPart session as
+/// `create partition primary`: the ioctl used by `delete_layout` leaves VDS with
+/// a stale layout, which makes `create partition primary` fail with
+/// "No usable free extent could be found".
+///
+/// DiskPart exits 0 even when a command fails, so the result is verified by
+/// asking the disk for its actual partition layout. If that fails, two
+/// progressively lower-level fallbacks are tried.
+fn create_partition(index: u32, disk_size: u64, log: &SharedLog) -> Result<()> {
     let script = format!(
-        "select disk {}\nattributes disk clear readonly\ncreate partition primary\nassign\nrescan\n",
+        "select disk {}\nattributes disk clear readonly\nclean\ncreate partition primary\nassign\nrescan\n",
         index
     );
     let out = format::run_diskpart(&script)?;
+    note(log, crate::log::LogLevel::Info, out.trim());
+
+    if partition_exists(index) {
+        note(
+            log,
+            crate::log::LogLevel::Success,
+            "Partition created and assigned (DiskPart)",
+        );
+        return Ok(());
+    }
+
+    note(
+        log,
+        crate::log::LogLevel::Warn,
+        "DiskPart did not create a partition; trying the ioctl layout writer.",
+    );
+    match create_partition_ioctl(index, disk_size, log) {
+        Ok(()) if partition_exists(index) => {
+            note(
+                log,
+                crate::log::LogLevel::Success,
+                "Partition created (ioctl layout writer)",
+            );
+            let _ = assign_free_letter(index, log);
+            return Ok(());
+        }
+        Ok(()) => note(
+            log,
+            crate::log::LogLevel::Warn,
+            "ioctl layout writer produced no visible partition",
+        ),
+        Err(e) => note(
+            log,
+            crate::log::LogLevel::Warn,
+            &format!("ioctl layout writer failed: {}", e),
+        ),
+    }
+
+    note(
+        log,
+        crate::log::LogLevel::Warn,
+        "Falling back to a raw MBR write.",
+    );
+    write_raw_mbr(index, disk_size, log)?;
+    let _ = format::run_diskpart(&format!("select disk {}\nrescan\n", index));
+    if !partition_exists(index) {
+        return Err(Error::Internal(
+            "could not create a partition table (DiskPart, ioctl and raw MBR all failed)".into(),
+        ));
+    }
+    let _ = assign_free_letter(index, log);
     note(
         log,
         crate::log::LogLevel::Success,
-        "Partition created and assigned",
+        "Partition created (raw MBR)",
     );
-    note(log, crate::log::LogLevel::Info, out.trim());
+    Ok(())
+}
+
+/// Read the real partition layout from the disk.
+fn partition_exists(index: u32) -> bool {
+    use windows_sys::Win32::System::Ioctl::{
+        DRIVE_LAYOUT_INFORMATION_EX, IOCTL_DISK_GET_DRIVE_LAYOUT_EX,
+    };
+    let h = match open_drive(index) {
+        Ok(h) => h,
+        Err(_) => return false,
+    };
+    let mut buf = vec![0u8; 4096];
+    let mut returned: u32 = 0;
+    let ok = unsafe {
+        DeviceIoControl(
+            h,
+            IOCTL_DISK_GET_DRIVE_LAYOUT_EX,
+            ptr::null_mut(),
+            0,
+            buf.as_mut_ptr() as *mut std::ffi::c_void,
+            buf.len() as u32,
+            &mut returned,
+            ptr::null_mut(),
+        )
+    };
+    unsafe { CloseHandle(h) };
+    if ok == 0 || (returned as usize) < std::mem::size_of::<DRIVE_LAYOUT_INFORMATION_EX>() {
+        return false;
+    }
+    let layout = unsafe { &*(buf.as_ptr() as *const DRIVE_LAYOUT_INFORMATION_EX) };
+    layout.PartitionCount > 0 && layout.PartitionEntry[0].PartitionLength > 0
+}
+
+/// Build the partition table with `IOCTL_DISK_CREATE_DISK` +
+/// `IOCTL_DISK_SET_DRIVE_LAYOUT_EX`. Locale-independent and fully verifiable.
+fn create_partition_ioctl(index: u32, disk_size: u64, log: &SharedLog) -> Result<()> {
+    use windows_sys::Win32::System::Ioctl::{
+        DRIVE_LAYOUT_INFORMATION_EX, DRIVE_LAYOUT_INFORMATION_EX_0, DRIVE_LAYOUT_INFORMATION_MBR,
+        IOCTL_DISK_CREATE_DISK, IOCTL_DISK_SET_DRIVE_LAYOUT_EX, IOCTL_DISK_UPDATE_PROPERTIES,
+        PARTITION_INFORMATION_EX, PARTITION_INFORMATION_EX_0, PARTITION_INFORMATION_MBR,
+        PARTITION_STYLE_MBR,
+    };
+
+    let h = open_drive(index)?;
+
+    #[repr(C)]
+    struct CreateDisk {
+        style: u32,
+        mbr_signature: u32,
+    }
+    let create = CreateDisk {
+        style: 0,
+        mbr_signature: 0xDEAD_BEEF,
+    };
+    let mut returned: u32 = 0;
+    let ok = unsafe {
+        DeviceIoControl(
+            h,
+            IOCTL_DISK_CREATE_DISK,
+            &create as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<CreateDisk>() as u32,
+            ptr::null_mut(),
+            0,
+            &mut returned,
+            ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        let e = crate::error::last_error();
+        unsafe { CloseHandle(h) };
+        return Err(e);
+    }
+
+    let start_lba: i64 = 2048; // 1 MiB alignment
+    let total_sectors = (disk_size / 512) as i64;
+    let length_sectors = (total_sectors - start_lba).max(1);
+
+    let layout = DRIVE_LAYOUT_INFORMATION_EX {
+        PartitionStyle: PARTITION_STYLE_MBR as u32,
+        PartitionCount: 1,
+        Anonymous: DRIVE_LAYOUT_INFORMATION_EX_0 {
+            Mbr: DRIVE_LAYOUT_INFORMATION_MBR {
+                Signature: 0xDEAD_BEEF,
+                CheckSum: 0,
+            },
+        },
+        PartitionEntry: [PARTITION_INFORMATION_EX {
+            PartitionStyle: PARTITION_STYLE_MBR,
+            StartingOffset: start_lba * 512,
+            PartitionLength: length_sectors * 512,
+            PartitionNumber: 1,
+            RewritePartition: 1,
+            IsServicePartition: 0,
+            Anonymous: PARTITION_INFORMATION_EX_0 {
+                Mbr: PARTITION_INFORMATION_MBR {
+                    PartitionType: 0x0C, // FAT32 LBA
+                    BootIndicator: 0,
+                    RecognizedPartition: 1,
+                    HiddenSectors: start_lba as u32,
+                    PartitionId: windows_sys::core::GUID {
+                        data1: 0,
+                        data2: 0,
+                        data3: 0,
+                        data4: [0; 8],
+                    },
+                },
+            },
+        }],
+    };
+
+    let ok = unsafe {
+        DeviceIoControl(
+            h,
+            IOCTL_DISK_SET_DRIVE_LAYOUT_EX,
+            &layout as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<DRIVE_LAYOUT_INFORMATION_EX>() as u32,
+            ptr::null_mut(),
+            0,
+            &mut returned,
+            ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        let e = crate::error::last_error();
+        unsafe { CloseHandle(h) };
+        return Err(e);
+    }
+
+    let _ = unsafe {
+        DeviceIoControl(
+            h,
+            IOCTL_DISK_UPDATE_PROPERTIES,
+            ptr::null_mut(),
+            0,
+            ptr::null_mut(),
+            0,
+            &mut returned,
+            ptr::null_mut(),
+        )
+    };
+    unsafe { CloseHandle(h) };
+    note(
+        log,
+        crate::log::LogLevel::Info,
+        "ioctl layout written (MBR, one partition)",
+    );
+    Ok(())
+}
+
+/// Build a single-partition MBR starting at LBA 2048 (1 MiB aligned).
+/// Returns `None` if the disk is too small to partition.
+pub(crate) fn build_mbr(disk_size: u64) -> Option<([u8; 512], u32, u32)> {
+    if disk_size < 1024 * 1024 {
+        return None;
+    }
+    let total_sectors = disk_size / 512;
+    let start_lba: u64 = 2048;
+    let sectors = total_sectors.saturating_sub(start_lba).min(u32::MAX as u64) as u32;
+    if sectors == 0 {
+        return None;
+    }
+
+    let mut mbr = [0u8; 512];
+    let e = 446;
+    mbr[e] = 0x00; // not bootable
+    mbr[e + 1] = 0xFE; // CHS start (dummy, LBA is authoritative)
+    mbr[e + 2] = 0xFF;
+    mbr[e + 3] = 0xFF;
+    mbr[e + 4] = 0x0C; // FAT32 LBA
+    mbr[e + 5] = 0xFE; // CHS end (dummy)
+    mbr[e + 6] = 0xFF;
+    mbr[e + 7] = 0xFF;
+    mbr[e + 8..e + 12].copy_from_slice(&(start_lba as u32).to_le_bytes());
+    mbr[e + 12..e + 16].copy_from_slice(&sectors.to_le_bytes());
+    mbr[510] = 0x55;
+    mbr[511] = 0xAA;
+
+    Some((mbr, start_lba as u32, sectors))
+}
+
+/// Last resort: write a valid MBR by hand. Independent of DiskPart and VDS.
+fn write_raw_mbr(index: u32, disk_size: u64, log: &SharedLog) -> Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
+
+    let (mbr, start_lba, sectors) = build_mbr(disk_size)
+        .ok_or_else(|| Error::Internal("disk size is unknown or too small to partition".into()))?;
+
+    let h = open_drive(index)?;
+    let mut written: u32 = 0;
+    let ok = unsafe { WriteFile(h, mbr.as_ptr(), 512, &mut written, ptr::null_mut()) };
+    if ok == 0 {
+        let e = crate::error::last_error();
+        unsafe { CloseHandle(h) };
+        return Err(e);
+    }
+    let _ = unsafe { FlushFileBuffers(h) };
+    unsafe { CloseHandle(h) };
+    note(
+        log,
+        crate::log::LogLevel::Info,
+        &format!(
+            "raw MBR written (start LBA {}, {} sectors)",
+            start_lba, sectors
+        ),
+    );
     Ok(())
 }
 
@@ -369,11 +625,12 @@ fn zero_signature_areas(index: u32, size_bytes: u64, log: &SharedLog) -> Result<
             };
         }
     }
+    let _ = unsafe { FlushFileBuffers(h) };
     unsafe { CloseHandle(h) };
     note(
         log,
         crate::log::LogLevel::Success,
-        "First/last 1 MiB zeroed",
+        "First/last 1 MiB zeroed and flushed",
     );
     Ok(())
 }
@@ -450,5 +707,29 @@ mod tests {
         assert_eq!(FsChoice::Fat32.fmifs_name(), "FAT32");
         assert_eq!(FsChoice::ExFat.fmifs_name(), "exFAT");
         assert_eq!(FsChoice::Ntfs.fmifs_name(), "NTFS");
+    }
+
+    #[test]
+    fn mbr_has_one_fat32_partition_at_1mib() {
+        let size = 32u64 * 1024 * 1024 * 1024;
+        let (mbr, start, sectors) = build_mbr(size).expect("mbr");
+        assert_eq!(mbr[510], 0x55);
+        assert_eq!(mbr[511], 0xAA);
+        assert_eq!(mbr[446], 0x00); // not bootable
+        assert_eq!(mbr[446 + 4], 0x0C); // FAT32 LBA
+        assert_eq!(start, 2048);
+        assert_eq!(sectors as u64, size / 512 - 2048);
+        assert_eq!(
+            u32::from_le_bytes([mbr[454], mbr[455], mbr[456], mbr[457]]),
+            2048
+        );
+    }
+
+    #[test]
+    fn mbr_rejects_unusable_disks() {
+        assert!(build_mbr(0).is_none());
+        assert!(build_mbr(4096).is_none());
+        // 1 MiB disk has no room after the 1 MiB alignment.
+        assert!(build_mbr(1024 * 1024).is_none());
     }
 }

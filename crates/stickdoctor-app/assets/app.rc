@@ -7,8 +7,8 @@
 1 24 "stickdoctor.manifest"
 
 1 VERSIONINFO
-FILEVERSION 0,2,1,0
-PRODUCTVERSION 0,2,1,0
+FILEVERSION 0,2,2,0
+PRODUCTVERSION 0,2,2,0
 FILEOS 0x40004
 FILETYPE 0x1
 BEGIN
@@ -18,11 +18,11 @@ BEGIN
     BEGIN
       VALUE "CompanyName", "Alexandru Stoian"
       VALUE "FileDescription", "StickDoctor - recover USB sticks Windows cannot format"
-      VALUE "FileVersion", "0.2.1"
+      VALUE "FileVersion", "0.2.2"
       VALUE "InternalName", "StickDoctor"
       VALUE "OriginalFilename", "StickDoctor.exe"
       VALUE "ProductName", "StickDoctor"
-      VALUE "ProductVersion", "0.2.1"
+      VALUE "ProductVersion", "0.2.2"
       VALUE "LegalCopyright", "Copyright (C) 2026 Alexandru Stoian. Licensed under GPL-3.0-or-later."
     END
   END

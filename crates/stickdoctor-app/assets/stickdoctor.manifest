@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="StickDoctor" version="0.2.1.0" processorArchitecture="*"/>
+  <assemblyIdentity type="win32" name="StickDoctor" version="0.2.2.0" processorArchitecture="*"/>
   <description>StickDoctor - USB stick recovery</description>
 
   <!-- Required: bind to Common Controls v6. Without this dependency Windows
