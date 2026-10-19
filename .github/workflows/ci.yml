@@ -37,6 +37,11 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  dependency-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
       - name: Dependency policy (cargo-deny)
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
