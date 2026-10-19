@@ -8,7 +8,7 @@ license = "GPL-3.0-or-later"
 version = "0.1.0"
 authors = ["Alexandru Stoian"]
 description = "Recover USB sticks that Windows can no longer format after writing a raw image"
-repository = "https://github.com/alexandrustoian/stickdoctor"
+repository = "https://github.com/lgstoian/stickdoctor"
 rust-version = "1.77"
 
 [profile.release]

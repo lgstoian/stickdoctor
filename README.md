@@ -3,7 +3,7 @@
 **Recover a USB stick that Windows can no longer format or even see after you
 `dd`'d a raw OS image onto it.**
 
-![CI](https://github.com/alexandrustoian/stickdoctor/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/lgstoian/stickdoctor/actions/workflows/ci.yml/badge.svg)
 ![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)
 
 ---
@@ -54,7 +54,7 @@ you care about.
 ## Download and run
 
 1. Download `StickDoctor.exe` from the
-   [latest release](https://github.com/alexandrustoian/stickdoctor/releases/latest).
+   [latest release](https://github.com/lgstoian/stickdoctor/releases/latest).
 2. Verify it against `SHA256SUMS.txt` if you like.
 3. Double-click it and accept the UAC prompt.
 4. Select your stick, choose a filesystem, click **REPAIR STICK**.

@@ -32,7 +32,7 @@ Releases are built from the tagged source by GitHub Actions. To build it
 yourself:
 
 ```powershell
-git clone https://github.com/alexandrustoian/stickdoctor
+git clone https://github.com/lgstoian/stickdoctor
 cd stickdoctor
 cargo build --release
 ```
