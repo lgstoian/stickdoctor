@@ -165,3 +165,40 @@ fn system_disk_number() -> Result<Option<u32>> {
         Ok(None)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::props::{BusType, DiskProperties};
+
+    fn props(bus: BusType, removable: bool) -> DiskProperties {
+        DiskProperties {
+            bus_type: bus,
+            removable,
+            writable: true,
+            size_bytes: 1024,
+            device_number: None,
+            model: None,
+            serial: None,
+        }
+    }
+
+    #[test]
+    fn non_usb_is_refused() {
+        let p = props(BusType::Nvme, false);
+        assert_eq!(safety_check(&p, 0).unwrap(), SafetyStatus::NotUsb);
+    }
+
+    #[test]
+    fn unknown_fixed_is_unknown() {
+        let p = props(BusType::Unknown, false);
+        assert_eq!(safety_check(&p, 0).unwrap(), SafetyStatus::Unknown);
+    }
+
+    #[test]
+    fn removable_unknown_treated_as_safe() {
+        // Some cheap USB bridges report an unknown bus but set the removable bit.
+        let p = props(BusType::Unknown, true);
+        assert_eq!(safety_check(&p, 0).unwrap(), SafetyStatus::Safe);
+    }
+}

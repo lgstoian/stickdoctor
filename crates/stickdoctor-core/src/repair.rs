@@ -355,3 +355,37 @@ fn note(log: &SharedLog, level: crate::log::LogLevel, msg: &str) {
         l.log(level, msg);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_label_strips_spaces_and_symbols() {
+        assert_eq!(sanitize_label("my stick!"), "mystick");
+        assert_eq!(sanitize_label(""), "STICK");
+        assert_eq!(sanitize_label("   "), "STICK");
+        assert_eq!(sanitize_label("a-b_c1234567890"), "a-b_c123456");
+    }
+
+    #[test]
+    fn sanitize_label_caps_at_eleven_chars() {
+        assert_eq!(sanitize_label("ABCDEFGHIJKLMNOPQRSTUV").len(), 11);
+    }
+
+    #[test]
+    fn fs_choice_warns_for_large_fat32() {
+        assert!(FsChoice::Fat32.warn_for_size(33.0).is_some());
+        assert!(FsChoice::Fat32.warn_for_size(32.0).is_none());
+        assert!(FsChoice::Fat32.warn_for_size(1.0).is_none());
+        assert!(FsChoice::ExFat.warn_for_size(100.0).is_none());
+        assert!(FsChoice::Ntfs.warn_for_size(100.0).is_none());
+    }
+
+    #[test]
+    fn fs_choice_names() {
+        assert_eq!(FsChoice::Fat32.fmifs_name(), "FAT32");
+        assert_eq!(FsChoice::ExFat.fmifs_name(), "exFAT");
+        assert_eq!(FsChoice::Ntfs.fmifs_name(), "NTFS");
+    }
+}
