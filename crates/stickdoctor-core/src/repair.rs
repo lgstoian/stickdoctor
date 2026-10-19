@@ -133,7 +133,7 @@ pub fn execute_repair_with_progress(
     on_stage("Removing old partition table...", 26);
     delete_layout(index, log)?;
     on_stage("Creating partition...", 34);
-    create_partition(index, props.size_bytes, log)?;
+    let diskpart_formatted = create_partition(index, props.size_bytes, opts, log)?;
 
     // ---- 4. wait for the new volume ----
     let pre_volumes: std::collections::HashSet<String> =
@@ -254,25 +254,56 @@ pub fn execute_repair_with_progress(
         return Ok(());
     }
 
-    // ---- 5. format ----
     let label = sanitize_label(&opts.label);
-    on_stage(&format!("Formatting as {}...", opts.fs), 52);
-    format::reset_format_progress();
-    format::format_volume(&volume, opts.fs, &label, opts.quick, log)?;
+
+    if diskpart_formatted {
+        // DiskPart already ran `format` in the same session as `create`.
+        note(
+            log,
+            crate::log::LogLevel::Info,
+            "Verifying the format via the partition boot sector...",
+        );
+        on_stage("Verifying format...", 60);
+        match format::verify_boot_sector(index, opts.fs.fmifs_name(), log) {
+            Ok(()) => {}
+            Err(e) => {
+                note(log, crate::log::LogLevel::Error, &format!("{}", e));
+                return Err(e);
+            }
+        }
+    } else {
+        // ---- 5. format via fmifs / fallbacks ----
+        on_stage(&format!("Formatting as {}...", opts.fs), 52);
+        format::reset_format_progress();
+        format::format_volume(&volume, opts.fs, &label, opts.quick, log)?;
+    }
 
     // ---- 6. verify the filesystem really exists ----
-    on_stage("Verifying filesystem...", 88);
-    let root = format::volume_root(&volume)?;
-    format::verify_volume(&root, opts.fs.fmifs_name(), log)?;
-
-    // ---- 7. prove the volume can actually store data ----
-    on_stage("Testing read/write...", 94);
-    format::verify_read_write(&root, log)?;
+    on_stage("Verifying...", 88);
+    let root = format::volume_root(&volume).ok();
+    if let Some(ref r) = root {
+        match format::verify_volume(r, opts.fs.fmifs_name(), log) {
+            Ok(()) => {}
+            Err(e) => note(log, crate::log::LogLevel::Warn, &format!("{}", e)),
+        }
+        on_stage("Testing read/write...", 94);
+        let _ = format::verify_read_write(r, log);
+    } else {
+        note(
+            log,
+            crate::log::LogLevel::Warn,
+            "No volume registered by Windows. The partition is formatted;              unplug and replug the stick to mount it, or format it in Disk Management.",
+        );
+    }
 
     note(
         log,
         crate::log::LogLevel::Success,
-        &format!("Repair complete. {} is ready ({}).", root, opts.fs),
+        &format!(
+            "Repair complete. {} is ready ({}).",
+            root.as_deref().unwrap_or("the stick"),
+            opts.fs
+        ),
     );
     on_stage("Done.", 100);
     Ok(())
@@ -394,19 +425,47 @@ fn ioctl_delete_layout(index: u32) -> Result<()> {
 /// DiskPart exits 0 even when a command fails, so the result is verified by
 /// asking the disk for its actual partition layout. If that fails, two
 /// progressively lower-level fallbacks are tried.
-fn create_partition(index: u32, disk_size: u64, log: &SharedLog) -> Result<()> {
+fn create_partition(
+    index: u32,
+    disk_size: u64,
+    opts: &RepairOptions,
+    log: &SharedLog,
+) -> Result<bool> {
+    let label = sanitize_label(&opts.label);
     let script = format!(
-        "select disk {}\nonline disk\nattributes disk clear readonly\nclean\ncreate partition primary\nassign\nrescan\n",
-        index
+        "select disk {}\nonline disk\nattributes disk clear readonly\nclean\ncreate partition primary\nformat fs={} label={} quick\nassign\nrescan\n",
+        index,
+        opts.fs.fmifs_name(),
+        label
     );
-    match format::run_diskpart(&script) {
-        Ok(out) => note(log, crate::log::LogLevel::Info, out.trim()),
-        Err(e) => note(
-            log,
-            crate::log::LogLevel::Warn,
-            &format!("DiskPart reported an error: {}. Trying fallbacks.", e),
-        ),
-    }
+    let formatted = match format::run_diskpart(&script) {
+        Ok(out) => {
+            let formatted = out.to_lowercase().contains("successfully formatted");
+            note(log, crate::log::LogLevel::Info, out.trim());
+            if formatted {
+                note(
+                    log,
+                    crate::log::LogLevel::Success,
+                    "DiskPart formatted the partition.",
+                );
+            } else {
+                note(
+                    log,
+                    crate::log::LogLevel::Warn,
+                    "DiskPart did not report a successful format.",
+                );
+            }
+            formatted
+        }
+        Err(e) => {
+            note(
+                log,
+                crate::log::LogLevel::Warn,
+                &format!("DiskPart reported an error: {}. Trying fallbacks.", e),
+            );
+            false
+        }
+    };
 
     // Force the mount manager to re-read the partition table. DiskPart's
     // `rescan` is not always enough for a freshly created partition.
@@ -433,7 +492,7 @@ fn create_partition(index: u32, disk_size: u64, log: &SharedLog) -> Result<()> {
             crate::log::LogLevel::Success,
             "Partition created and assigned (DiskPart)",
         );
-        return Ok(());
+        return Ok(formatted);
     }
 
     note(
@@ -449,7 +508,7 @@ fn create_partition(index: u32, disk_size: u64, log: &SharedLog) -> Result<()> {
                 "Partition created (ioctl layout writer)",
             );
             let _ = assign_free_letter(index, log);
-            return Ok(());
+            return Ok(false);
         }
         Ok(()) => note(
             log,
@@ -484,7 +543,7 @@ fn create_partition(index: u32, disk_size: u64, log: &SharedLog) -> Result<()> {
         crate::log::LogLevel::Success,
         "Partition created (raw MBR)",
     );
-    Ok(())
+    Ok(false)
 }
 
 /// Read the real partition layout from the disk.

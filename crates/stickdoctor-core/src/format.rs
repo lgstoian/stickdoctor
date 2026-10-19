@@ -495,6 +495,62 @@ pub fn run_diskpart(script: &str) -> Result<String> {
     Ok(combined)
 }
 
+/// Read the partition's boot sector and check the filesystem signature.
+/// This does not require a mounted volume, so it works even when Windows
+/// has not registered a volume for the partition yet.
+pub fn verify_boot_sector(index: u32, expected_fs: &str, log: &SharedLog) -> Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{ReadFile, SetFilePointerEx};
+    let path = format!(r"\\.\PhysicalDrive{}", index);
+    let path_w: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let h = unsafe {
+        CreateFileW(
+            path_w.as_ptr(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            ptr::null(),
+            OPEN_EXISTING,
+            0,
+            ptr::null_mut(),
+        )
+    };
+    if h == INVALID_HANDLE_VALUE {
+        return Err(crate::error::last_error());
+    }
+    let mut pos: i64 = 0;
+    let ok = unsafe { SetFilePointerEx(h, 2048 * 512, &mut pos, 0) };
+    if ok == 0 {
+        let e = crate::error::last_error();
+        unsafe { CloseHandle(h) };
+        return Err(e);
+    }
+    let mut buf = [0u8; 512];
+    let mut read: u32 = 0;
+    let ok = unsafe { ReadFile(h, buf.as_mut_ptr(), 512, &mut read, ptr::null_mut()) };
+    unsafe { CloseHandle(h) };
+    if ok == 0 || read < 512 {
+        return Err(Error::Internal(
+            "cannot read the partition boot sector".into(),
+        ));
+    }
+    let sig_ok = match expected_fs {
+        "FAT32" => &buf[82..90] == b"FAT32   ",
+        "exFAT" => &buf[3..11] == b"EXFAT   ",
+        "NTFS" => &buf[3..11] == b"NTFS    ",
+        _ => true,
+    };
+    if !sig_ok {
+        return Err(Error::Internal(format!(
+            "boot sector does not contain a {} signature (format did not take effect)",
+            expected_fs
+        )));
+    }
+    note(
+        log,
+        LogLevel::Success,
+        &format!("Boot sector confirms {} filesystem.", expected_fs),
+    );
+    Ok(())
+}
 fn note(log: &SharedLog, level: LogLevel, msg: &str) {
     if let Ok(mut l) = log.lock() {
         l.log(level, msg);
