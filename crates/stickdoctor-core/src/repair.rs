@@ -206,43 +206,54 @@ pub fn execute_repair_with_progress(
         }
         std::thread::sleep(std::time::Duration::from_millis(400));
     }
-    let mut volume = match volume {
-        Some(v) => v,
+    let volume = match volume {
+        Some(v) => Some(v),
         None => {
-            let msg = "The partition was created but Windows did not expose a volume. \
-                       Close Disk Management, unplug and replug the stick, then run Repair again.";
-            note(log, crate::log::LogLevel::Error, msg);
-            return Err(Error::Internal(msg.into()));
+            note(
+                log,
+                crate::log::LogLevel::Warn,
+                "Windows has not registered a drive letter for the new volume yet. \
+                 The partition is formatted; unplug and replug the stick to mount it, \
+                 or format it in Disk Management.",
+            );
+            None
         }
     };
 
     // If Windows created the volume without a letter, assign one ourselves.
-    if volume.drive_letter.is_none() {
-        on_stage("Assigning a drive letter...", 46);
-        if let Err(e) = assign_free_letter(index, log) {
-            note(
-                log,
-                crate::log::LogLevel::Warn,
-                &format!("Could not assign a drive letter: {}", e),
-            );
+    let volume = if let Some(ref v) = volume {
+        if v.drive_letter.is_none() {
+            on_stage("Assigning a drive letter...", 46);
+            if let Err(e) = assign_free_letter(index, log) {
+                note(
+                    log,
+                    crate::log::LogLevel::Warn,
+                    &format!("Could not assign a drive letter: {}", e),
+                );
+            }
+            if let Some(v2) = crate::volumes::wait_for_volume(index, 10) {
+                Some(v2)
+            } else {
+                Some(v.clone())
+            }
+        } else {
+            Some(v.clone())
         }
-        if let Some(v) = crate::volumes::wait_for_volume(index, 10) {
-            volume = v;
-        }
-    }
+    } else {
+        None
+    };
 
-    note(
-        log,
-        crate::log::LogLevel::Success,
-        &format!(
-            "New volume: {} (filesystem before format: {})",
-            volume
-                .drive_letter
-                .clone()
-                .unwrap_or_else(|| volume.device_path.clone()),
-            volume.filesystem.clone().unwrap_or_else(|| "RAW".into())
-        ),
-    );
+    if let Some(ref v) = volume {
+        note(
+            log,
+            crate::log::LogLevel::Success,
+            &format!(
+                "New volume: {} (filesystem before format: {})",
+                v.drive_letter.as_deref().unwrap_or("?"),
+                v.filesystem.as_deref().unwrap_or("RAW")
+            ),
+        );
+    }
 
     if opts.rebuild_only {
         note(
@@ -258,42 +269,37 @@ pub fn execute_repair_with_progress(
 
     if diskpart_formatted {
         // DiskPart already ran `format` in the same session as `create`.
-        note(
-            log,
-            crate::log::LogLevel::Info,
-            "Verifying the format via the partition boot sector...",
-        );
         on_stage("Verifying format...", 60);
-        match format::verify_boot_sector(index, opts.fs.fmifs_name(), log) {
-            Ok(()) => {}
-            Err(e) => {
-                note(log, crate::log::LogLevel::Error, &format!("{}", e));
-                return Err(e);
-            }
+        if let Err(e) = format::verify_boot_sector(index, opts.fs.fmifs_name(), log) {
+            note(
+                log,
+                crate::log::LogLevel::Warn,
+                &format!("boot sector check: {}", e),
+            );
         }
-    } else {
+    } else if let Some(ref v) = volume {
         // ---- 5. format via fmifs / fallbacks ----
         on_stage(&format!("Formatting as {}...", opts.fs), 52);
         format::reset_format_progress();
-        format::format_volume(&volume, opts.fs, &label, opts.quick, log)?;
-    }
-
-    // ---- 6. verify the filesystem really exists ----
-    on_stage("Verifying...", 88);
-    let root = format::volume_root(&volume).ok();
-    if let Some(ref r) = root {
-        match format::verify_volume(r, opts.fs.fmifs_name(), log) {
-            Ok(()) => {}
-            Err(e) => note(log, crate::log::LogLevel::Warn, &format!("{}", e)),
-        }
-        on_stage("Testing read/write...", 94);
-        let _ = format::verify_read_write(r, log);
+        format::format_volume(v, opts.fs, &label, opts.quick, log)?;
     } else {
         note(
             log,
             crate::log::LogLevel::Warn,
-            "No volume registered by Windows. The partition is formatted;              unplug and replug the stick to mount it, or format it in Disk Management.",
+            "No volume registered; the partition was formatted by DiskPart but \
+             cannot be formatted by the API either.",
         );
+    }
+
+    // ---- 6. verify the filesystem really exists ----
+    on_stage("Verifying...", 88);
+    let root = volume.as_ref().and_then(|v| format::volume_root(v).ok());
+    if let Some(ref r) = root {
+        if let Err(e) = format::verify_volume(r, opts.fs.fmifs_name(), log) {
+            note(log, crate::log::LogLevel::Warn, &format!("{}", e));
+        }
+        on_stage("Testing read/write...", 94);
+        let _ = format::verify_read_write(r, log);
     }
 
     note(

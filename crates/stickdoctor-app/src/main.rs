@@ -320,11 +320,7 @@ fn build_ui() {
         .parent(&window)
         .build(&mut notice)
         .expect("notice");
-    nwg::Timer::builder()
-        .parent(&window)
-        .interval(2000)
-        .build(&mut timer)
-        .expect("timer");
+    let _ = &mut timer; // hotplug timer removed (caused startup flicker)
 
     let window_icon = nwg::Icon::from_bin(include_bytes!("../assets/stickdoctor.ico")).ok();
     if let Some(ref icon) = window_icon {
@@ -426,7 +422,9 @@ fn build_ui() {
         last_signature: RefCell::new(String::new()),
     });
 
+    table.set_redraw(false);
     refresh_ui(&table, &details, &status, &state);
+    table.set_redraw(true);
 
     let window = Rc::new(window);
     let window_h = window.clone();
@@ -492,16 +490,7 @@ fn build_ui() {
                     repair_btn.set_enabled(true);
                 }
             }
-            E::OnTimerTick => {
-                // Hotplug detection: refresh only when the set of disks changes.
-                if !st.busy.load(Ordering::Relaxed) {
-                    let signature = disk_signature();
-                    if signature != *st.last_signature.borrow() {
-                        *st.last_signature.borrow_mut() = signature;
-                        refresh_ui(&table, &details, &status, &st);
-                    }
-                }
-            }
+            // hotplug polling removed; use Refresh or replug
             E::OnWindowClose => {
                 save_settings(&current_settings(
                     &fs_combo,

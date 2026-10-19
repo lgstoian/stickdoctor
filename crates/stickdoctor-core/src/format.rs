@@ -560,3 +560,12 @@ fn note(log: &SharedLog, level: LogLevel, msg: &str) {
 fn encode_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
+
+/// Verify that a disk has a properly formatted, mounted volume.
+/// Returns `Ok(Some(info))` if a volume with a filesystem is found.
+/// Returns `Ok(None)` if the disk has no volume or no filesystem.
+/// Returns `Err` if the disk cannot be accessed.
+pub fn verify_disk(index: u32) -> Result<Option<VolumeInfo>> {
+    let vols = crate::volumes::disk_volumes(index)?;
+    Ok(vols.into_iter().find(|v| v.filesystem.is_some()))
+}

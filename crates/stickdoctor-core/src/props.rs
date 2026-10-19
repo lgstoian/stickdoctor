@@ -104,12 +104,64 @@ pub struct DiskProperties {
     pub serial: Option<String>,
 }
 
+/// Classification of the physical media, for display and policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MediaType {
+    UsbStick,
+    SdCard,
+    CfCard,
+    Ssd,
+    Hdd,
+    Unknown,
+}
+
+impl std::fmt::Display for MediaType {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            MediaType::UsbStick => write!(f, "USB stick"),
+            MediaType::SdCard => write!(f, "SD card"),
+            MediaType::CfCard => write!(f, "CF card"),
+            MediaType::Ssd => write!(f, "SSD"),
+            MediaType::Hdd => write!(f, "HDD"),
+            MediaType::Unknown => write!(f, "Unknown"),
+        }
+    }
+}
+
 impl DiskProperties {
     pub fn size_gb(&self) -> f64 {
         self.size_bytes as f64 / 1_000_000_000.0
     }
     pub fn size_gib(&self) -> f64 {
         self.size_bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+    }
+
+    /// Classify the media from bus type, model name and the removable bit.
+    pub fn media_type(&self) -> MediaType {
+        let model_lc = self.model.as_deref().unwrap_or("").to_lowercase();
+        if self.bus_type == BusType::Usb && self.removable {
+            if model_lc.contains("cf") || model_lc.contains("compactflash") {
+                return MediaType::CfCard;
+            }
+            if model_lc.contains("sd") {
+                return MediaType::SdCard;
+            }
+            return MediaType::UsbStick;
+        }
+        if model_lc.contains("sd") && self.removable {
+            return MediaType::SdCard;
+        }
+        match self.bus_type {
+            BusType::Nvme => MediaType::Ssd,
+            BusType::Sata | BusType::Scsi => {
+                if self.removable {
+                    MediaType::UsbStick
+                } else {
+                    MediaType::Hdd
+                }
+            }
+            _ => MediaType::Unknown,
+        }
     }
 
     /// One-line summary for the device list.

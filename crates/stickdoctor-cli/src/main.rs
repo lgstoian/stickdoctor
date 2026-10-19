@@ -11,6 +11,7 @@ fn main() -> ExitCode {
 
     match args.first().map(|s| s.as_str()) {
         None | Some("list") => cmd_list(&args),
+        Some("verify") => cmd_verify(&args[1..]),
         Some("repair") => cmd_repair(&args[1..]),
         Some("--version") | Some("-V") => {
             println!("stickdoctor {}", VERSION);
@@ -23,6 +24,37 @@ fn main() -> ExitCode {
         Some(other) => {
             eprintln!("Unknown command: {}", other);
             print_help();
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_verify(args: &[String]) -> ExitCode {
+    let positionals: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+    let index: u32 = match positionals.first().and_then(|s| s.parse().ok()) {
+        Some(v) => v,
+        None => {
+            eprintln!("Usage: stickdoctor-cli verify <N>");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    println!("Verifying PhysicalDrive{}...", index);
+    match stickdoctor_core::verify_disk(index) {
+        Ok(Some(v)) => {
+            let letter = v.drive_letter.as_deref().unwrap_or("?");
+            let fs = v.filesystem.as_deref().unwrap_or("unknown");
+            println!("  Volume: {}  filesystem: {}", letter, fs);
+            println!("Result: OK - the stick is formatted and mounted.");
+            ExitCode::SUCCESS
+        }
+        Ok(None) => {
+            println!("Result: NOT FORMATTED - no volume with a filesystem found.");
+            println!("  Run: stickdoctor-cli repair {} fat32", index);
+            ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("Cannot inspect disk {}: {}", index, e);
             ExitCode::FAILURE
         }
     }
@@ -98,7 +130,7 @@ fn cmd_list(args: &[String]) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    println!("IDX  BUS     SIZE        SAFETY      MODEL                       LAYOUT");
+    println!("IDX  MEDIA       BUS     SIZE        SAFETY      MODEL                       LAYOUT");
     println!("{}", "-".repeat(104));
 
     for c in &candidates {
@@ -114,8 +146,9 @@ fn cmd_list(args: &[String]) -> ExitCode {
             .clone()
             .unwrap_or_else(|| "Unknown".into());
         println!(
-            "{:<4} {:<6} {:<11} {:<10} {:<26} {}",
+            "{:<4} {:<12} {:<6} {:<11} {:<10} {:<26} {}",
             index,
+            c.properties.media_type().to_string(),
             c.properties.bus_type.to_string(),
             format!("{:.1} GiB", c.properties.size_gib()),
             c.safety.label(),
