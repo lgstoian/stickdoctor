@@ -1,0 +1,28 @@
+[package]
+name = "stickdoctor-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+build = "build.rs"
+
+[dependencies]
+stickdoctor-core = { path = "../stickdoctor-core" }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_Security",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Controls",
+    "Win32_UI_Shell",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_System_Registry",
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
+] }
+native-windows-gui = { version = "1.0", default-features = false, features = [
+    "listbox", "list-view", "textbox", "combobox",
+    "notice", "message-window", "frame", "high-dpi", "image-list", "image-decoder",
+] }

@@ -1,0 +1,30 @@
+#include <windows.h>
+
+1 ICON "stickdoctor.ico"
+1 24 "stickdoctor.manifest"
+
+1 VERSIONINFO
+FILEVERSION 0,1,0,0
+PRODUCTVERSION 0,1,0,0
+FILEOS VOS_NT_WINDOWS32
+FILETYPE VFT_APP
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "StickDoctor contributors"
+      VALUE "FileDescription", "StickDoctor - recover USB sticks Windows cannot format"
+      VALUE "FileVersion", "0.1.0"
+      VALUE "InternalName", "StickDoctor"
+      VALUE "OriginalFilename", "StickDoctor.exe"
+      VALUE "ProductName", "StickDoctor"
+      VALUE "ProductVersion", "0.1.0"
+      VALUE "LegalCopyright", "GPL-3.0-or-later"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x0409, 1200
+  END
+END

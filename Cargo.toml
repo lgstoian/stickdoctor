@@ -1,0 +1,19 @@
+[workspace]
+members = ["crates/stickdoctor-core", "crates/stickdoctor-cli", "crates/stickdoctor-app"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "GPL-3.0-or-later"
+version = "0.1.0"
+authors = ["StickDoctor contributors"]
+description = "Recover USB sticks that Windows can no longer format after writing a raw image"
+repository = "https://github.com/OWNER/stickdoctor"
+rust-version = "1.77"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

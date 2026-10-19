@@ -1,0 +1,46 @@
+name: Bug report
+description: Something did not work as expected
+title: "[bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please include the log (GUI: **Save log**) — it contains the real error.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What did you do, what did you expect, what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Paste the contents of the saved log file.
+      render: text
+  - type: input
+    id: stick
+    attributes:
+      label: USB stick
+      description: Model and size.
+      placeholder: SanDisk Ultra 32 GB
+  - type: input
+    id: image
+    attributes:
+      label: Image written with dd
+      description: Which image, and which tool did you use?
+      placeholder: Ubuntu 24.04 ISO via balenaEtcher
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 23H2 (22631)
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I ran StickDoctor as Administrator
+        - label: The stick appears in Disk Management
