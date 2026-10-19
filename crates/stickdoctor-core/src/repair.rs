@@ -117,7 +117,16 @@ pub fn execute_repair_with_progress(
     // ---- 2. optional raw wipe of the signature areas ----
     if opts.zero_sectors {
         on_stage("Zeroing first/last 1 MiB...", 18);
-        zero_signature_areas(index, props.size_bytes, log)?;
+        if let Err(e) = zero_signature_areas(index, props.size_bytes, log) {
+            note(
+                log,
+                crate::log::LogLevel::Warn,
+                &format!(
+                    "Skipping the optional zero pass: {}. Continuing with the rebuild.",
+                    e
+                ),
+            );
+        }
     }
 
     // ---- 3. rebuild the partition table ----
@@ -318,11 +327,17 @@ fn ioctl_delete_layout(index: u32) -> Result<()> {
 /// progressively lower-level fallbacks are tried.
 fn create_partition(index: u32, disk_size: u64, log: &SharedLog) -> Result<()> {
     let script = format!(
-        "select disk {}\nattributes disk clear readonly\nclean\ncreate partition primary\nassign\nrescan\n",
+        "select disk {}\nonline disk\nattributes disk clear readonly\nclean\ncreate partition primary\nassign\nrescan\n",
         index
     );
-    let out = format::run_diskpart(&script)?;
-    note(log, crate::log::LogLevel::Info, out.trim());
+    match format::run_diskpart(&script) {
+        Ok(out) => note(log, crate::log::LogLevel::Info, out.trim()),
+        Err(e) => note(
+            log,
+            crate::log::LogLevel::Warn,
+            &format!("DiskPart reported an error: {}. Trying fallbacks.", e),
+        ),
+    }
 
     if partition_exists(index) {
         note(
@@ -369,7 +384,10 @@ fn create_partition(index: u32, disk_size: u64, log: &SharedLog) -> Result<()> {
     let _ = format::run_diskpart(&format!("select disk {}\nrescan\n", index));
     if !partition_exists(index) {
         return Err(Error::Internal(
-            "could not create a partition table (DiskPart, ioctl and raw MBR all failed)".into(),
+            "could not create a partition table (DiskPart, ioctl and raw MBR all failed). "
+                .to_string()
+                + "The disk is probably still in use: close Explorer, Disk Management and any "
+                + "format dialogs, or unplug and replug the stick, then try again.",
         ));
     }
     let _ = assign_free_letter(index, log);
@@ -638,21 +656,31 @@ fn zero_signature_areas(index: u32, size_bytes: u64, log: &SharedLog) -> Result<
 fn open_drive(index: u32) -> Result<windows_sys::Win32::Foundation::HANDLE> {
     let path = format!(r"\\.\PhysicalDrive{}", index);
     let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
-    let h = unsafe {
-        CreateFileW(
-            wide.as_ptr(),
-            GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            ptr::null(),
-            OPEN_EXISTING,
-            0,
-            ptr::null_mut(),
-        )
-    };
-    if h == INVALID_HANDLE_VALUE {
-        return Err(crate::error::last_error());
+    let mut last_error = None;
+    // DiskPart/VDS and antivirus can hold the disk for a moment after a
+    // previous operation; retry briefly before giving up.
+    for attempt in 0..12 {
+        let h = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                ptr::null(),
+                OPEN_EXISTING,
+                0,
+                ptr::null_mut(),
+            )
+        };
+        if h != INVALID_HANDLE_VALUE {
+            return Ok(h);
+        }
+        last_error = Some(crate::error::last_error());
+        if attempt < 11 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
     }
-    Ok(h)
+    Err(last_error
+        .unwrap_or_else(|| crate::error::Error::Internal("cannot open the physical drive".into())))
 }
 
 /// Keep labels short, safe for every filesystem, and safe for diskpart scripts.

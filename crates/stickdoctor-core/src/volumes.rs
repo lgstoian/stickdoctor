@@ -268,21 +268,23 @@ pub fn lock_dismount_all(target_disk_index: u32) -> Result<(usize, usize)> {
         }
         if ok_lock != 0 {
             locked += 1;
-            let ok_dis = unsafe {
-                DeviceIoControl(
-                    h,
-                    FSCTL_DISMOUNT_VOLUME,
-                    ptr::null_mut(),
-                    0,
-                    ptr::null_mut(),
-                    0,
-                    &mut returned,
-                    ptr::null_mut(),
-                )
-            };
-            if ok_dis != 0 {
-                dismounted += 1;
-            }
+        }
+        // Dismount even if the exclusive lock was refused: releasing the
+        // volume is what lets DiskPart open the disk.
+        let ok_dis = unsafe {
+            DeviceIoControl(
+                h,
+                FSCTL_DISMOUNT_VOLUME,
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                0,
+                &mut returned,
+                ptr::null_mut(),
+            )
+        };
+        if ok_dis != 0 {
+            dismounted += 1;
         }
         unsafe { CloseHandle(h) };
     }
