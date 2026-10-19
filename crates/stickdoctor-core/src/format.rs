@@ -223,7 +223,13 @@ fn format_with_fmifs(
     };
 
     // Lock + dismount the volume while fmifs writes to it.
-    let wide: Vec<u16> = root.encode_utf16().chain(std::iter::once(0)).collect();
+    // FSCTL_LOCK_VOLUME requires the volume device path (`\\.\E:`), not `E:\`.
+    let lock_path = if root.len() >= 2 && root.as_bytes()[1] == b':' {
+        format!(r"\\.\{}", &root[..2])
+    } else {
+        root.trim_end_matches('\\').to_string()
+    };
+    let wide: Vec<u16> = lock_path.encode_utf16().chain(std::iter::once(0)).collect();
     let vol = unsafe {
         CreateFileW(
             wide.as_ptr(),
