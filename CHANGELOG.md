@@ -5,6 +5,15 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-10-19
+
+### Fixed
+- **The GUI failed at startup** with *"The procedure entry point
+  GetWindowSubclass could not be located"*. The embedded manifest did not
+  declare the Common Controls v6 dependency, so Windows loaded `comctl32` v5,
+  which does not export `GetWindowSubclass`. The manifest now binds to
+  `Microsoft.Windows.Common-Controls` 6.0.0.0. Verified by launching the built
+  binary with the manifest applied.
 ## [0.2.0] - 2026-10-19
 
 ### Added
