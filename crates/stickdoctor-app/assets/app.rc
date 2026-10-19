@@ -13,14 +13,14 @@ BEGIN
   BEGIN
     BLOCK "040904B0"
     BEGIN
-      VALUE "CompanyName", "StickDoctor contributors"
+      VALUE "CompanyName", "Alexandru Stoian"
       VALUE "FileDescription", "StickDoctor - recover USB sticks Windows cannot format"
       VALUE "FileVersion", "0.1.0"
       VALUE "InternalName", "StickDoctor"
       VALUE "OriginalFilename", "StickDoctor.exe"
       VALUE "ProductName", "StickDoctor"
       VALUE "ProductVersion", "0.1.0"
-      VALUE "LegalCopyright", "GPL-3.0-or-later"
+      VALUE "LegalCopyright", "Copyright (C) 2026 Alexandru Stoian. Licensed under GPL-3.0-or-later."
     END
   END
   BLOCK "VarFileInfo"
