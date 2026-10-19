@@ -137,11 +137,40 @@ pub fn execute_repair_with_progress(
 
     // ---- 4. wait for the new volume ----
     on_stage("Waiting for the new volume...", 42);
-    let mut volume = match crate::volumes::wait_for_volume(index, 25) {
+    let mut volume: Option<crate::volumes::VolumeInfo> = None;
+    for attempt in 0..40 {
+        match crate::volumes::disk_volumes(index) {
+            Ok(vols) => {
+                note(
+                    log,
+                    crate::log::LogLevel::Info,
+                    &format!(
+                        "wait attempt {}: {} volume(s) on disk",
+                        attempt + 1,
+                        vols.len()
+                    ),
+                );
+                if let Some(v) = vols.into_iter().next() {
+                    volume = Some(v);
+                    break;
+                }
+            }
+            Err(e) => note(
+                log,
+                crate::log::LogLevel::Warn,
+                &format!("wait attempt {}: {}", attempt + 1, e),
+            ),
+        }
+        if attempt == 8 || attempt == 18 || attempt == 28 {
+            let _ = format::run_diskpart(&format!("select disk {}\nrescan\n", index));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    }
+    let mut volume = match volume {
         Some(v) => v,
         None => {
             let msg = "The partition was created but Windows did not expose a volume. \
-                       Try unplugging and reinserting the stick, then run Repair again.";
+                       Close Disk Management, unplug and replug the stick, then run Repair again.";
             note(log, crate::log::LogLevel::Error, msg);
             return Err(Error::Internal(msg.into()));
         }
