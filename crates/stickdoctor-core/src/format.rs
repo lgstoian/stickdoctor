@@ -90,7 +90,42 @@ pub fn format_volume(
 }
 
 /// Re-read the filesystem and fail unless it matches `expected`.
+/// Windows can take a moment to remount a volume after formatting, so this
+/// retries before declaring failure.
 pub fn verify_volume(root: &str, expected: &str, log: &SharedLog) -> Result<()> {
+    let mut last_error = String::new();
+    for attempt in 0..10 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        match read_volume(root) {
+            Ok((detected, label)) => {
+                if detected.eq_ignore_ascii_case(expected) {
+                    note(
+                        log,
+                        LogLevel::Success,
+                        &format!("Verified {} as {} (label \"{}\")", root, detected, label),
+                    );
+                    return Ok(());
+                }
+                last_error = format!(
+                    "format did not take effect: {} reports {} but {} was requested",
+                    root,
+                    if detected.is_empty() {
+                        "RAW"
+                    } else {
+                        &detected
+                    },
+                    expected
+                );
+            }
+            Err(e) => last_error = e.to_string(),
+        }
+    }
+    Err(Error::Internal(last_error))
+}
+
+fn read_volume(root: &str) -> Result<(String, String)> {
     use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationW;
     let wide: Vec<u16> = root.encode_utf16().chain(std::iter::once(0)).collect();
     let mut fs_buf = vec![0u16; 64];
@@ -109,38 +144,19 @@ pub fn verify_volume(root: &str, expected: &str, log: &SharedLog) -> Result<()> 
     };
     if ok == 0 {
         return Err(Error::Internal(format!(
-            "cannot read filesystem on {} after formatting (volume may be RAW): {}",
+            "cannot read filesystem on {} (volume may be RAW): {}",
             root,
             crate::error::last_error()
         )));
     }
-    let detected = String::from_utf16_lossy(&fs_buf)
-        .trim_end_matches('\0')
-        .to_string();
-    let detected_label = String::from_utf16_lossy(&label_buf)
-        .trim_end_matches('\0')
-        .to_string();
-    if !detected.eq_ignore_ascii_case(expected) {
-        return Err(Error::Internal(format!(
-            "format did not take effect: {} reports {} but {} was requested",
-            root,
-            if detected.is_empty() {
-                "RAW"
-            } else {
-                &detected
-            },
-            expected
-        )));
-    }
-    note(
-        log,
-        LogLevel::Success,
-        &format!(
-            "Verified {} as {} (label \"{}\")",
-            root, detected, detected_label
-        ),
-    );
-    Ok(())
+    Ok((
+        String::from_utf16_lossy(&fs_buf)
+            .trim_end_matches('\0')
+            .to_string(),
+        String::from_utf16_lossy(&label_buf)
+            .trim_end_matches('\0')
+            .to_string(),
+    ))
 }
 
 /// Drive root such as `E:\`, or the volume GUID path when there is no letter.
