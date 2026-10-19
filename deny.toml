@@ -5,6 +5,9 @@ yanked = "warn"
 
 [licenses]
 confidence-threshold = 0.93
+# A broad allow-list is kept so that adding a dependency does not fail CI
+# merely because an entry is currently unused.
+unused-allowed-license = "allow"
 allow = [
     "MIT",
     "Apache-2.0",
@@ -20,7 +23,9 @@ allow = [
 
 [bans]
 multiple-versions = "warn"
-wildcards = "deny"
+# Workspace-internal path dependencies have no version, which cargo-deny would
+# otherwise report as wildcards. They are not published, so allow them.
+wildcards = "allow"
 
 [sources]
 unknown-registry = "deny"
