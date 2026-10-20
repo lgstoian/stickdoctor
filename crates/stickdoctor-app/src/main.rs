@@ -195,6 +195,7 @@ fn build_ui() {
     let mut clear_ro_btn: nwg::Button = Default::default();
     let mut chkdsk_btn: nwg::Button = Default::default();
     let mut capacity_btn: nwg::Button = Default::default();
+    let mut overwrite_btn: nwg::Button = Default::default();
     let mut refresh_btn: nwg::Button = Default::default();
     let mut repair_btn: nwg::Button = Default::default();
     let mut save_btn: nwg::Button = Default::default();
@@ -308,6 +309,11 @@ fn build_ui() {
         .parent(&window)
         .build(&mut capacity_btn)
         .expect("capacity");
+    nwg::Button::builder()
+        .text("Full overwrite card")
+        .parent(&window)
+        .build(&mut overwrite_btn)
+        .expect("overwrite");
 
     nwg::Button::builder()
         .text("Refresh")
@@ -401,6 +407,8 @@ fn build_ui() {
     chkdsk_btn.set_size(230, 30);
     capacity_btn.set_position(738, 424);
     capacity_btn.set_size(244, 30);
+    overwrite_btn.set_position(18, 458);
+    overwrite_btn.set_size(230, 28);
 
     refresh_btn.set_position(18, 464);
     refresh_btn.set_size(110, 32);
@@ -549,6 +557,24 @@ fn build_ui() {
                             None => log.lock().unwrap().warn("No drive letter on this disk."),
                         }
                     });
+                } else if handle == overwrite_btn {
+                    let choice = nwg::modal_message(
+                        window_h.as_ref(),
+                        &nwg::MessageParams {
+                            title: "Full overwrite",
+                            content: "This zeroes the ENTIRE card. It is slow (minutes for large cards) but fixes cards that quick formatting cannot.\n\nContinue?",
+                            buttons: nwg::MessageButtons::YesNo,
+                            icons: nwg::MessageIcons::Warning,
+                        },
+                    );
+                    if choice == nwg::MessageChoice::Yes {
+                        run_tool(st.clone(), sender, "overwrite", |_idx, log| {
+                            match stickdoctor_core::full_overwrite(_idx, log) {
+                                Ok(()) => {}
+                                Err(e) => log.lock().unwrap().error(e.to_string()),
+                            }
+                        });
+                    }
                 } else if handle == capacity_btn {
                     let choice = nwg::modal_message(
                         window_h.as_ref(),
