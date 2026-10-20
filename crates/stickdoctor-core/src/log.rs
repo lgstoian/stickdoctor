@@ -1,5 +1,5 @@
 use std::fmt;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogLevel {
@@ -10,15 +10,33 @@ pub enum LogLevel {
     Step,
 }
 
+impl LogLevel {
+    /// Short tag used in the rendered log.
+    fn tag(self) -> &'static str {
+        match self {
+            LogLevel::Info => "info",
+            LogLevel::Warn => "warn",
+            LogLevel::Error => "fail",
+            LogLevel::Success => " ok ",
+            LogLevel::Step => "step",
+        }
+    }
+
+    /// Single character marker.
+    fn mark(self) -> &'static str {
+        match self {
+            LogLevel::Info => "i",
+            LogLevel::Warn => "!",
+            LogLevel::Error => "x",
+            LogLevel::Success => "+",
+            LogLevel::Step => ">",
+        }
+    }
+}
+
 impl fmt::Display for LogLevel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            LogLevel::Info => write!(f, "INFO"),
-            LogLevel::Warn => write!(f, "WARN"),
-            LogLevel::Error => write!(f, "ERROR"),
-            LogLevel::Success => write!(f, "OK"),
-            LogLevel::Step => write!(f, "STEP"),
-        }
+        write!(f, "{}", self.tag())
     }
 }
 
@@ -30,18 +48,26 @@ pub struct LogEvent {
     pub detail: Option<String>,
 }
 
-impl fmt::Display for LogEvent {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.detail {
-            Some(d) => write!(f, "[{}] {} {}", self.level, self.message, d),
-            None => write!(f, "[{}] {}", self.level, self.message),
-        }
+impl LogEvent {
+    fn render(&self, elapsed: Duration) -> String {
+        let secs = elapsed.as_secs_f64();
+        let marker = self.level.mark();
+        let tag = self.level.tag();
+        let detail = match &self.detail {
+            Some(d) => format!("  |  {}", d),
+            None => String::new(),
+        };
+        format!(
+            "{:>8.3}s  [{}] {}  {}{}",
+            secs, tag, marker, self.message, detail
+        )
     }
 }
 
 #[derive(Debug, Default)]
 pub struct Logger {
     events: Vec<LogEvent>,
+    start: Option<SystemTime>,
 }
 
 impl Logger {
@@ -50,6 +76,7 @@ impl Logger {
     }
 
     pub fn log(&mut self, level: LogLevel, message: impl Into<String>) {
+        self.ensure_start();
         self.events.push(LogEvent {
             level,
             timestamp: SystemTime::now(),
@@ -64,6 +91,7 @@ impl Logger {
         message: impl Into<String>,
         detail: impl Into<String>,
     ) {
+        self.ensure_start();
         self.events.push(LogEvent {
             level,
             timestamp: SystemTime::now(),
@@ -94,13 +122,37 @@ impl Logger {
 
     pub fn clear(&mut self) {
         self.events.clear();
+        self.start = None;
     }
 
+    fn ensure_start(&mut self) {
+        if self.start.is_none() {
+            self.start = Some(SystemTime::now());
+        }
+    }
+
+    /// Elegant, human-readable rendering with elapsed time, level tag and an
+    /// optional detail column.
     pub fn render(&self) -> String {
+        let start = match self.start {
+            Some(s) => s,
+            None => return String::new(),
+        };
         self.events
             .iter()
-            .map(|e| e.to_string())
+            .map(|e| {
+                let elapsed = e.timestamp.duration_since(start).unwrap_or_default();
+                e.render(elapsed)
+            })
             .collect::<Vec<_>>()
-            .join("\n")
+            .join("\r\n")
+    }
+
+    /// A single-line summary (used by the status bar / quick views).
+    pub fn summary(&self) -> String {
+        match self.events.last() {
+            Some(e) => e.message.clone(),
+            None => String::new(),
+        }
     }
 }

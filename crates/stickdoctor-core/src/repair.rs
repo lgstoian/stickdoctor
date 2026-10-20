@@ -92,6 +92,33 @@ pub fn execute_repair_with_progress(
     if let Some(warn) = opts.fs.warn_for_size(props.size_gib()) {
         note(log, crate::log::LogLevel::Warn, warn);
     }
+    // Rich disk summary — invaluable when diagnosing a stubborn stick.
+    note(
+        log,
+        crate::log::LogLevel::Info,
+        &format!(
+            "Disk summary: bus={} media={} size={:.2} GiB ({:.0} bytes) removable={} writable={}",
+            props.bus_type,
+            props.media_type(),
+            props.size_gib(),
+            props.size_bytes,
+            props.removable,
+            props.writable,
+        ),
+    );
+    if let Some(ref m) = props.model {
+        note(log, crate::log::LogLevel::Info, &format!("Model: {}", m));
+    }
+    if let Some(ref s) = props.serial {
+        note(log, crate::log::LogLevel::Info, &format!("Serial: {}", s));
+    }
+    if let Some(n) = props.device_number {
+        note(
+            log,
+            crate::log::LogLevel::Info,
+            &format!("Storage device number: {}", n),
+        );
+    }
     note(
         log,
         crate::log::LogLevel::Step,

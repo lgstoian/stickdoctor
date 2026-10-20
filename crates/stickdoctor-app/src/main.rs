@@ -207,7 +207,7 @@ fn build_ui() {
     let mut notice: nwg::Notice = Default::default();
 
     nwg::Window::builder()
-        .size((1020, 940))
+        .size((1080, 1000))
         .position((160, 20))
         .title(&format!(
             "{} {} - removable media recovery",
@@ -370,72 +370,72 @@ fn build_ui() {
 
     // ---- layout ----
     title.set_position(18, 12);
-    title.set_size(984, 26);
+    title.set_size(1044, 26);
     subtitle.set_position(18, 40);
-    subtitle.set_size(984, 20);
+    subtitle.set_size(1044, 20);
     devices_label.set_position(18, 70);
-    devices_label.set_size(984, 18);
+    devices_label.set_size(1044, 18);
     table.set_position(18, 90);
-    table.set_size(984, 150);
-    details_label.set_position(18, 248);
-    details_label.set_size(984, 18);
-    details.set_position(18, 268);
-    details.set_size(984, 92);
+    table.set_size(1044, 170);
+    details_label.set_position(18, 268);
+    details_label.set_size(1044, 18);
+    details.set_position(18, 288);
+    details.set_size(1044, 110);
 
-    fs_label.set_position(18, 372);
+    fs_label.set_position(18, 410);
     fs_label.set_size(80, 20);
-    fs_combo.set_position(102, 368);
+    fs_combo.set_position(102, 406);
     fs_combo.set_size(130, 180);
-    name_label.set_position(248, 372);
+    name_label.set_position(248, 410);
     name_label.set_size(42, 20);
-    label_input.set_position(294, 368);
+    label_input.set_position(294, 406);
     label_input.set_size(150, 24);
-    quick_check.set_position(454, 368);
+    quick_check.set_position(454, 406);
     quick_check.set_size(120, 24);
-    zero_check.set_position(582, 368);
+    zero_check.set_position(582, 406);
     zero_check.set_size(180, 24);
-    rebuild_check.set_position(770, 368);
-    rebuild_check.set_size(212, 24);
+    rebuild_check.set_position(770, 406);
+    rebuild_check.set_size(292, 24);
 
-    tools_label.set_position(18, 404);
-    tools_label.set_size(984, 18);
-    scan_btn.set_position(18, 424);
-    scan_btn.set_size(230, 30);
-    clear_ro_btn.set_position(258, 424);
-    clear_ro_btn.set_size(230, 30);
-    chkdsk_btn.set_position(498, 424);
-    chkdsk_btn.set_size(230, 30);
-    capacity_btn.set_position(738, 424);
-    capacity_btn.set_size(244, 30);
-    overwrite_btn.set_position(18, 458);
-    overwrite_btn.set_size(230, 28);
+    tools_label.set_position(18, 440);
+    tools_label.set_size(1044, 18);
+    scan_btn.set_position(18, 460);
+    scan_btn.set_size(250, 30);
+    clear_ro_btn.set_position(278, 460);
+    clear_ro_btn.set_size(250, 30);
+    chkdsk_btn.set_position(538, 460);
+    chkdsk_btn.set_size(250, 30);
+    capacity_btn.set_position(798, 460);
+    capacity_btn.set_size(264, 30);
+    overwrite_btn.set_position(18, 496);
+    overwrite_btn.set_size(250, 30);
 
-    refresh_btn.set_position(18, 464);
+    refresh_btn.set_position(18, 536);
     refresh_btn.set_size(110, 32);
-    repair_btn.set_position(138, 464);
+    repair_btn.set_position(138, 536);
     repair_btn.set_size(190, 32);
-    save_btn.set_position(338, 464);
+    save_btn.set_position(338, 536);
     save_btn.set_size(110, 32);
-    copy_btn.set_position(458, 464);
+    copy_btn.set_position(458, 536);
     copy_btn.set_size(110, 32);
-    progress.set_position(580, 470);
-    progress.set_size(402, 18);
-    status.set_position(18, 504);
-    status.set_size(984, 20);
+    progress.set_position(580, 542);
+    progress.set_size(482, 18);
+    status.set_position(18, 576);
+    status.set_size(1044, 20);
 
-    log_label.set_position(18, 530);
-    log_label.set_size(984, 18);
-    log_text.set_position(18, 550);
-    log_text.set_size(984, 368);
+    log_label.set_position(18, 602);
+    log_label.set_size(1044, 18);
+    log_text.set_position(18, 622);
+    log_text.set_size(1044, 360);
 
     for (i, (text, width)) in [
         ("Disk", 60),
         ("Media", 100),
         ("Bus", 70),
         ("Size", 90),
-        ("Model", 300),
-        ("Partition table", 200),
-        ("Safety", 180),
+        ("Model", 340),
+        ("Partition table", 240),
+        ("Safety", 144),
     ]
     .iter()
     .enumerate()
@@ -625,7 +625,7 @@ fn build_ui() {
                 }
                 if let Some(log) = log_slot.lock().unwrap().as_ref() {
                     if let Ok(l) = log.lock() {
-                        log_text.set_text(&l.render());
+                        log_text.set_text_unix2dos(&l.render());
                         log_text.scroll_lastline();
                     }
                 }
@@ -797,12 +797,12 @@ fn update_details(table: &nwg::ListView, details: &nwg::TextBox, state: &State) 
     {
         Some(c) => {
             let mut text = c.details_text();
-            text.push_str(&format!("\nSafety: {}", c.safety.label()));
+            text.push_str(&format!("\nSafety: {}", c.safety.long_label()));
             text.push_str(&format!("\nMedia: {}", c.properties.media_type()));
             if !c.can_repair() {
                 text.push_str("\n\nThis disk will NOT be repaired (safety rule).");
             }
-            details.set_text(&text);
+            details.set_text_unix2dos(&text);
         }
         None => details.set_text(""),
     }

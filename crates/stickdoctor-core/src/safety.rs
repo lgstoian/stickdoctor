@@ -23,9 +23,19 @@ pub enum SafetyStatus {
 impl SafetyStatus {
     pub fn label(&self) -> &'static str {
         match self {
+            SafetyStatus::Safe => "safe",
+            SafetyStatus::SystemDisk => "SYSTEM",
+            SafetyStatus::NotUsb => "not USB",
+            SafetyStatus::Unknown => "unknown",
+        }
+    }
+
+    /// Longer explanation, for the details pane.
+    pub fn long_label(&self) -> &'static str {
+        match self {
             SafetyStatus::Safe => "Safe to repair",
             SafetyStatus::SystemDisk => "SYSTEM DISK — repair refused",
-            SafetyStatus::NotUsb => "Not a USB device — repair refused",
+            SafetyStatus::NotUsb => "Not removable media — repair refused",
             SafetyStatus::Unknown => "Cannot identify — run as Administrator",
         }
     }
