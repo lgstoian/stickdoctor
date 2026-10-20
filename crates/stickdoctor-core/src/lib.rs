@@ -6,6 +6,7 @@ mod log;
 mod props;
 mod repair;
 mod safety;
+mod tools;
 mod volumes;
 mod win32_const;
 
@@ -22,6 +23,10 @@ pub use repair::{
     execute_repair, execute_repair_with_progress, FsChoice, RepairOptions, StageCallback,
 };
 pub use safety::{safety_check, SafetyStatus};
+pub use tools::{
+    clear_read_only, full_overwrite, run_chkdsk, scan_lost_partitions, verify_capacity,
+    CapacityReport, LostPartition,
+};
 pub use volumes::{disk_volumes, lock_dismount_all, wait_for_volume, VolumeInfo};
 
 use std::sync::{Arc, Mutex};

@@ -12,6 +12,10 @@ fn main() -> ExitCode {
     match args.first().map(|s| s.as_str()) {
         None | Some("list") => cmd_list(&args),
         Some("verify") => cmd_verify(&args[1..]),
+        Some("scan") => cmd_scan(&args[1..]),
+        Some("clear-readonly") => cmd_clear_ro(&args[1..]),
+        Some("chkdsk") => cmd_chkdsk(&args[1..]),
+        Some("capacity") => cmd_capacity(&args[1..]),
         Some("repair") => cmd_repair(&args[1..]),
         Some("--version") | Some("-V") => {
             println!("stickdoctor {}", VERSION);
@@ -58,6 +62,111 @@ fn cmd_verify(args: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn cmd_scan(args: &[String]) -> ExitCode {
+    let index = match positional_index(args) {
+        Some(i) => i,
+        None => {
+            eprintln!("Usage: stickdoctor-cli scan <N>");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!("Scanning PhysicalDrive{} for lost partitions...", index);
+    let found = stickdoctor_core::scan_lost_partitions(index);
+    if found.is_empty() {
+        println!("No lost partitions found.");
+    } else {
+        for p in found {
+            println!("  {} at LBA {} (signature {})", p.kind, p.lba, p.signature);
+        }
+    }
+    ExitCode::SUCCESS
+}
+
+fn cmd_clear_ro(args: &[String]) -> ExitCode {
+    let index = match positional_index(args) {
+        Some(i) => i,
+        None => {
+            eprintln!("Usage: stickdoctor-cli clear-readonly <N>");
+            return ExitCode::FAILURE;
+        }
+    };
+    match stickdoctor_core::clear_read_only(index) {
+        Ok(messages) => {
+            for m in messages {
+                println!("{}", m);
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("Failed: {}", e);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_chkdsk(args: &[String]) -> ExitCode {
+    let positionals: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
+    let letter = match positionals.first() {
+        Some(l) => l.trim_end_matches(':').to_string(),
+        None => {
+            eprintln!("Usage: stickdoctor-cli chkdsk <DRIVE>");
+            return ExitCode::FAILURE;
+        }
+    };
+    match stickdoctor_core::run_chkdsk(&letter) {
+        Ok(out) => {
+            print!("{}", out);
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("chkdsk failed: {}", e);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn cmd_capacity(args: &[String]) -> ExitCode {
+    let index = match positional_index(args) {
+        Some(i) => i,
+        None => {
+            eprintln!("Usage: stickdoctor-cli capacity <N>");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!(
+        "Testing capacity of PhysicalDrive{} (writes test data)...",
+        index
+    );
+    let log = stickdoctor_core::new_logger();
+    match stickdoctor_core::verify_capacity(index, &log) {
+        Ok(r) => {
+            if r.genuine {
+                println!(
+                    "Result: GENUINE - all {} test offsets passed.",
+                    r.tested_offsets.len()
+                );
+                ExitCode::SUCCESS
+            } else {
+                println!(
+                    "Result: COUNTERFEIT - first failure at offset {}.",
+                    r.first_failure.unwrap_or(0)
+                );
+                ExitCode::FAILURE
+            }
+        }
+        Err(e) => {
+            eprintln!("Capacity test failed: {}", e);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn positional_index(args: &[String]) -> Option<u32> {
+    args.iter()
+        .find(|a| !a.starts_with("--"))
+        .and_then(|s| s.parse().ok())
 }
 
 fn print_help() {

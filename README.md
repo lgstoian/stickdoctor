@@ -40,14 +40,27 @@ normal FAT32/exFAT/NTFS volume, and then **proves the result works**.
 
 - FAT32, exFAT and NTFS; quick or full format; optional zeroing of the first
   and last 1 MiB for stubborn sticks.
-- **Post-format read/write test** so "formatted" actually means "usable".
-- **Automatic hotplug refresh** when you plug or unplug a stick.
+- **Works on USB sticks, SD cards and CF cards** — the media type is detected and
+  shown in the list.
+- **Verified formatting**: the partition boot sector is read back and the
+  filesystem signature is checked, so "formatted" actually means "formatted".
+- **Post-format read/write test** so "usable" is proven, not assumed.
 - **Live progress bar** driven by the formatter's own percentage callback.
 - **Rebuild partition table only** mode for advanced users.
 - **Drive-letter fallback** if Windows does not assign one.
 - **Settings are remembered** in `%APPDATA%\StickDoctor\config.json`.
 - **Copy log** and **Save log**.
-- CLI with `list`, `repair`, `--json`, `--dry-run`, `--rebuild-only`.
+- CLI with `list`, `repair`, `verify`, `--json`, `--dry-run`, `--rebuild-only`.
+
+### Tools
+
+| Tool | What it does | Safe? |
+|---|---|---|
+| Scan for lost partitions | TestDisk-style search for orphaned boot sectors | Read-only |
+| Clear write protection | Clears disk + volume read-only attributes, reports registry policy | Non-destructive |
+| Repair filesystem | `chkdsk <drive>: /f` when a volume is mounted | Non-destructive |
+| Test capacity | Counterfeit / fake-capacity detection at 25/50/75/95 % | **Writes** |
+| Full overwrite | Zero the entire card before formatting (SD Association style) | Destructive |
 
 ## Safety
 
@@ -90,12 +103,17 @@ raw disks; verify the source and checksum before trusting a binary.
 ### CLI
 
 ```
-StickDoctorCLI.exe                              # list disks
+StickDoctorCLI.exe                              # list disks (shows MEDIA column)
 StickDoctorCLI.exe list --json                  # machine-readable
 StickDoctorCLI.exe repair 3 fat32 MYSTICK       # repair disk 3
 StickDoctorCLI.exe repair 3 exfat MYSTICK --yes --zero
 StickDoctorCLI.exe repair 3 --rebuild-only      # no format
 StickDoctorCLI.exe repair 3 --dry-run           # show what would happen
+StickDoctorCLI.exe verify 3                     # is it formatted?
+StickDoctorCLI.exe scan 3                       # look for lost partitions
+StickDoctorCLI.exe clear-readonly 3             # clear write protection
+StickDoctorCLI.exe chkdsk E                     # repair the filesystem
+StickDoctorCLI.exe capacity 3                   # counterfeit test (writes!)
 ```
 
 ## Troubleshooting

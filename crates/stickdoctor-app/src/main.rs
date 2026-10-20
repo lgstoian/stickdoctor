@@ -2,14 +2,14 @@
 
 use native_windows_gui as nwg;
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use stickdoctor_core::{
-    enumerate_disks, execute_repair_with_progress, format_progress, new_logger, DiskCandidate,
-    FsChoice, RepairOptions, SharedLog,
+    clear_read_only, enumerate_disks, execute_repair_with_progress, format_progress, new_logger,
+    run_chkdsk, scan_lost_partitions, verify_capacity, DiskCandidate, FsChoice, RepairOptions,
+    SharedLog,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -161,15 +161,18 @@ fn warn_box(text: &str) {
 // ------------------------------------------------------------------- state
 
 struct State {
-    candidates: RefCell<Vec<DiskCandidate>>,
+    candidates: Arc<Mutex<Vec<DiskCandidate>>>,
     log_slot: Arc<Mutex<Option<SharedLog>>>,
     stage_slot: Arc<Mutex<String>>,
     base_pct: Arc<AtomicU8>,
     busy: Arc<AtomicBool>,
-    last_signature: RefCell<String>,
+    /// Candidates produced by a background probe, waiting to be rendered.
+    pending: Arc<Mutex<Option<Vec<DiskCandidate>>>>,
+    /// Row currently highlighted in the list.
+    selection: Arc<Mutex<usize>>,
 }
 
-#[allow(deprecated)] // nwg::Timer is deprecated in favour of AnimationTimer but still works
+#[allow(deprecated)] // nwg::Timer is deprecated; we no longer use it.
 fn build_ui() {
     let settings = load_settings();
 
@@ -187,6 +190,11 @@ fn build_ui() {
     let mut quick_check: nwg::CheckBox = Default::default();
     let mut zero_check: nwg::CheckBox = Default::default();
     let mut rebuild_check: nwg::CheckBox = Default::default();
+    let mut tools_label: nwg::Label = Default::default();
+    let mut scan_btn: nwg::Button = Default::default();
+    let mut clear_ro_btn: nwg::Button = Default::default();
+    let mut chkdsk_btn: nwg::Button = Default::default();
+    let mut capacity_btn: nwg::Button = Default::default();
     let mut refresh_btn: nwg::Button = Default::default();
     let mut repair_btn: nwg::Button = Default::default();
     let mut save_btn: nwg::Button = Default::default();
@@ -196,12 +204,14 @@ fn build_ui() {
     let mut log_label: nwg::Label = Default::default();
     let mut log_text: nwg::TextBox = Default::default();
     let mut notice: nwg::Notice = Default::default();
-    let mut timer: nwg::Timer = Default::default();
 
     nwg::Window::builder()
-        .size((1000, 800))
+        .size((1020, 940))
         .position((160, 20))
-        .title(&format!("{} {} - USB stick recovery", APP_TITLE, VERSION))
+        .title(&format!(
+            "{} {} - removable media recovery",
+            APP_TITLE, VERSION
+        ))
         .build(&mut window)
         .expect("window");
 
@@ -211,12 +221,12 @@ fn build_ui() {
         .build(&mut title)
         .expect("title");
     nwg::Label::builder()
-        .text("Recover a USB stick that Windows can no longer format or see after writing a raw image.")
+        .text("Recover USB sticks, SD cards and CF cards that Windows can no longer format or see after writing a raw image.")
         .parent(&window)
         .build(&mut subtitle)
         .expect("subtitle");
     nwg::Label::builder()
-        .text("1. Select the stick you want to repair")
+        .text("1. Select the media you want to repair")
         .parent(&window)
         .build(&mut devices_label)
         .expect("devices label");
@@ -273,6 +283,32 @@ fn build_ui() {
         .build(&mut rebuild_check)
         .expect("rebuild");
 
+    nwg::Label::builder()
+        .text("3. Tools")
+        .parent(&window)
+        .build(&mut tools_label)
+        .expect("tools label");
+    nwg::Button::builder()
+        .text("Scan for lost partitions")
+        .parent(&window)
+        .build(&mut scan_btn)
+        .expect("scan");
+    nwg::Button::builder()
+        .text("Clear write protection")
+        .parent(&window)
+        .build(&mut clear_ro_btn)
+        .expect("clear ro");
+    nwg::Button::builder()
+        .text("Repair filesystem (chkdsk)")
+        .parent(&window)
+        .build(&mut chkdsk_btn)
+        .expect("chkdsk");
+    nwg::Button::builder()
+        .text("Test capacity (writes!)")
+        .parent(&window)
+        .build(&mut capacity_btn)
+        .expect("capacity");
+
     nwg::Button::builder()
         .text("Refresh")
         .parent(&window)
@@ -320,67 +356,78 @@ fn build_ui() {
         .parent(&window)
         .build(&mut notice)
         .expect("notice");
-    let _ = &mut timer; // hotplug timer removed (caused startup flicker)
 
-    let window_icon = nwg::Icon::from_bin(include_bytes!("../assets/stickdoctor.ico")).ok();
-    if let Some(ref icon) = window_icon {
+    let _window_icon = nwg::Icon::from_bin(include_bytes!("../assets/stickdoctor.ico")).ok();
+    if let Some(ref icon) = _window_icon {
         window.set_icon(Some(icon));
     }
 
     // ---- layout ----
     title.set_position(18, 12);
-    title.set_size(964, 26);
+    title.set_size(984, 26);
     subtitle.set_position(18, 40);
-    subtitle.set_size(964, 20);
+    subtitle.set_size(984, 20);
     devices_label.set_position(18, 70);
-    devices_label.set_size(964, 18);
+    devices_label.set_size(984, 18);
     table.set_position(18, 90);
-    table.set_size(964, 150);
+    table.set_size(984, 150);
     details_label.set_position(18, 248);
-    details_label.set_size(964, 18);
+    details_label.set_size(984, 18);
     details.set_position(18, 268);
-    details.set_size(964, 110);
+    details.set_size(984, 92);
 
-    fs_label.set_position(18, 390);
+    fs_label.set_position(18, 372);
     fs_label.set_size(80, 20);
-    fs_combo.set_position(102, 386);
+    fs_combo.set_position(102, 368);
     fs_combo.set_size(130, 180);
-    name_label.set_position(248, 390);
+    name_label.set_position(248, 372);
     name_label.set_size(42, 20);
-    label_input.set_position(294, 386);
+    label_input.set_position(294, 368);
     label_input.set_size(150, 24);
-    quick_check.set_position(454, 386);
+    quick_check.set_position(454, 368);
     quick_check.set_size(120, 24);
-    zero_check.set_position(582, 386);
+    zero_check.set_position(582, 368);
     zero_check.set_size(180, 24);
-    rebuild_check.set_position(770, 386);
+    rebuild_check.set_position(770, 368);
     rebuild_check.set_size(212, 24);
 
-    refresh_btn.set_position(18, 424);
-    refresh_btn.set_size(110, 32);
-    repair_btn.set_position(138, 424);
-    repair_btn.set_size(190, 32);
-    save_btn.set_position(338, 424);
-    save_btn.set_size(110, 32);
-    copy_btn.set_position(458, 424);
-    copy_btn.set_size(110, 32);
-    progress.set_position(580, 430);
-    progress.set_size(402, 18);
-    status.set_position(18, 464);
-    status.set_size(964, 20);
+    tools_label.set_position(18, 404);
+    tools_label.set_size(984, 18);
+    scan_btn.set_position(18, 424);
+    scan_btn.set_size(230, 30);
+    clear_ro_btn.set_position(258, 424);
+    clear_ro_btn.set_size(230, 30);
+    chkdsk_btn.set_position(498, 424);
+    chkdsk_btn.set_size(230, 30);
+    capacity_btn.set_position(738, 424);
+    capacity_btn.set_size(244, 30);
 
-    log_label.set_position(18, 488);
-    log_label.set_size(964, 18);
-    log_text.set_position(18, 508);
-    log_text.set_size(964, 276);
+    refresh_btn.set_position(18, 464);
+    refresh_btn.set_size(110, 32);
+    repair_btn.set_position(138, 464);
+    repair_btn.set_size(190, 32);
+    save_btn.set_position(338, 464);
+    save_btn.set_size(110, 32);
+    copy_btn.set_position(458, 464);
+    copy_btn.set_size(110, 32);
+    progress.set_position(580, 470);
+    progress.set_size(402, 18);
+    status.set_position(18, 504);
+    status.set_size(984, 20);
+
+    log_label.set_position(18, 530);
+    log_label.set_size(984, 18);
+    log_text.set_position(18, 550);
+    log_text.set_size(984, 368);
 
     for (i, (text, width)) in [
         ("Disk", 60),
+        ("Media", 100),
         ("Bus", 70),
         ("Size", 90),
         ("Model", 300),
         ("Partition table", 200),
-        ("Safety", 200),
+        ("Safety", 180),
     ]
     .iter()
     .enumerate()
@@ -413,23 +460,30 @@ fn build_ui() {
         nwg::CheckBoxState::Unchecked
     });
 
-    let state = Rc::new(State {
-        candidates: RefCell::new(Vec::new()),
+    let state = Arc::new(State {
+        candidates: Arc::new(Mutex::new(Vec::new())),
         log_slot: Arc::new(Mutex::new(None)),
         stage_slot: Arc::new(Mutex::new(String::new())),
         base_pct: Arc::new(AtomicU8::new(0)),
         busy: Arc::new(AtomicBool::new(false)),
-        last_signature: RefCell::new(String::new()),
+        pending: Arc::new(Mutex::new(None)),
+        selection: Arc::new(Mutex::new(0)),
     });
 
-    table.set_redraw(false);
-    refresh_ui(&table, &details, &status, &state);
-    table.set_redraw(true);
+    // Kick off the initial probe off the UI thread so startup is instant.
+    let sender = notice.sender();
+    let st = state.clone();
+    std::thread::spawn(move || {
+        let candidates = probe_all();
+        if let Ok(mut slot) = st.pending.lock() {
+            *slot = Some(candidates);
+        }
+        sender.notice();
+    });
 
     let window = Rc::new(window);
     let window_h = window.clone();
     let st = state.clone();
-    let sender = notice.sender();
     let stage_slot = state.stage_slot.clone();
     let base_pct = state.base_pct.clone();
     let log_slot = state.log_slot.clone();
@@ -439,7 +493,7 @@ fn build_ui() {
         match evt {
             E::OnButtonClick => {
                 if handle == refresh_btn {
-                    refresh_ui(&table, &details, &status, &st);
+                    start_refresh(st.clone(), sender);
                 } else if handle == repair_btn {
                     on_repair(
                         &window_h,
@@ -460,14 +514,89 @@ fn build_ui() {
                     save_log(window_h.as_ref(), &log_text, &status);
                 } else if handle == copy_btn {
                     copy_log(window_h.as_ref(), &log_text, &status);
+                } else if handle == scan_btn {
+                    run_tool(st.clone(), sender, "scan", move |idx, log| {
+                        let found = scan_lost_partitions(idx);
+                        if found.is_empty() {
+                            log.lock().unwrap().info("No lost partitions found.");
+                        }
+                        for p in found {
+                            log.lock().unwrap().info(format!(
+                                "found {} at LBA {} (signature {})",
+                                p.kind, p.lba, p.signature
+                            ));
+                        }
+                    });
+                } else if handle == clear_ro_btn {
+                    run_tool(st.clone(), sender, "clear-readonly", |idx, log| {
+                        for m in clear_read_only(idx).unwrap_or_else(|e| vec![e.to_string()]) {
+                            log.lock().unwrap().info(m);
+                        }
+                    });
+                } else if handle == chkdsk_btn {
+                    let st_for_tool = st.clone();
+                    run_tool(st.clone(), sender, "chkdsk", move |idx, log| {
+                        let letter = selected_letter(&st_for_tool, idx);
+                        match letter {
+                            Some(l) => match run_chkdsk(&l) {
+                                Ok(out) => {
+                                    for line in out.lines().filter(|l| !l.trim().is_empty()) {
+                                        log.lock().unwrap().info(line);
+                                    }
+                                }
+                                Err(e) => log.lock().unwrap().error(e.to_string()),
+                            },
+                            None => log.lock().unwrap().warn("No drive letter on this disk."),
+                        }
+                    });
+                } else if handle == capacity_btn {
+                    let choice = nwg::modal_message(
+                        window_h.as_ref(),
+                        &nwg::MessageParams {
+                            title: "Capacity test writes data",
+                            content: "This writes test patterns to the media. Use it only on a card whose data you do not need.\n\nContinue?",
+                            buttons: nwg::MessageButtons::YesNo,
+                            icons: nwg::MessageIcons::Warning,
+                        },
+                    );
+                    if choice == nwg::MessageChoice::Yes {
+                        run_tool(
+                            st.clone(),
+                            sender,
+                            "capacity",
+                            |idx, log| match verify_capacity(idx, log) {
+                                Ok(r) => {
+                                    if r.genuine {
+                                        log.lock().unwrap().success("Capacity test passed.");
+                                    } else {
+                                        log.lock().unwrap().error(format!(
+                                            "Counterfeit media: first failure at offset {}.",
+                                            r.first_failure.unwrap_or(0)
+                                        ));
+                                    }
+                                }
+                                Err(e) => log.lock().unwrap().error(e.to_string()),
+                            },
+                        );
+                    }
                 }
             }
             E::OnListViewClick | E::OnListViewDoubleClick => {
                 if handle == table {
+                    if let Some(i) = table.selected_item() {
+                        *st.selection.lock().unwrap() = i;
+                    }
                     update_details(&table, &details, &st);
                 }
             }
             E::OnNotice => {
+                // Apply any candidates produced by a background probe.
+                let pending = st.pending.lock().unwrap().take();
+                if let Some(c) = pending {
+                    table.set_redraw(false);
+                    refresh_ui_from(&table, &details, &status, &st, c);
+                    table.set_redraw(true);
+                }
                 if let Some(log) = log_slot.lock().unwrap().as_ref() {
                     if let Ok(l) = log.lock() {
                         log_text.set_text(&l.render());
@@ -490,7 +619,6 @@ fn build_ui() {
                     repair_btn.set_enabled(true);
                 }
             }
-            // hotplug polling removed; use Refresh or replug
             E::OnWindowClose => {
                 save_settings(&current_settings(
                     &fs_combo,
@@ -505,20 +633,65 @@ fn build_ui() {
         }
     });
 
-    *state.last_signature.borrow_mut() = disk_signature();
-
     nwg::dispatch_thread_events();
     nwg::unbind_event_handler(&handler);
 }
 
-fn disk_signature() -> String {
-    enumerate_disks()
-        .unwrap_or_default()
+/// Probe every disk off the UI thread.
+fn probe_all() -> Vec<DiskCandidate> {
+    let devices = enumerate_disks().unwrap_or_default();
+    devices.iter().map(DiskCandidate::probe).collect()
+}
+
+/// Spawn a background probe and notify the UI when done.
+fn start_refresh(state: Arc<State>, sender: nwg::NoticeSender) {
+    std::thread::spawn(move || {
+        let candidates = probe_all();
+        if let Ok(mut slot) = state.pending.lock() {
+            *slot = Some(candidates);
+        }
+        sender.notice();
+    });
+}
+
+/// Run a tool in the background thread, logging its output.
+fn run_tool<F>(state: Arc<State>, sender: nwg::NoticeSender, name: &str, f: F)
+where
+    F: FnOnce(u32, &SharedLog) + Send + 'static,
+{
+    let index = match selected_index(&state) {
+        Some(i) => i,
+        None => return,
+    };
+    let label = name.to_string();
+    let log = new_logger();
+    *state.log_slot.lock().unwrap() = Some(log.clone());
+    *state.stage_slot.lock().unwrap() = format!("Running {}...", label);
+    sender.notice();
+    std::thread::spawn(move || {
+        f(index, &log);
+        sender.notice();
+    });
+}
+
+fn selected_index(state: &State) -> Option<u32> {
+    let candidates = state.candidates.lock().unwrap();
+    let selection = *state.selection.lock().unwrap();
+    candidates
+        .get(selection)
+        .and_then(|c| c.device.drive_index)
+        .or_else(|| candidates.first().and_then(|c| c.device.drive_index))
+}
+
+fn selected_letter(state: &State, index: u32) -> Option<String> {
+    let candidates = state.candidates.lock().unwrap();
+    let c = candidates
         .iter()
-        .filter_map(|d| d.drive_index)
-        .map(|i| i.to_string())
-        .collect::<Vec<_>>()
-        .join(",")
+        .find(|c| c.device.drive_index == Some(index))?;
+    c.volumes
+        .iter()
+        .find_map(|v| v.drive_letter.clone())
+        .or_else(|| c.volumes.first().and_then(|v| v.drive_letter.clone()))
 }
 
 fn current_settings(
@@ -537,20 +710,21 @@ fn current_settings(
     }
 }
 
-fn refresh_ui(table: &nwg::ListView, details: &nwg::TextBox, status: &nwg::Label, state: &State) {
+fn refresh_ui_from(
+    table: &nwg::ListView,
+    details: &nwg::TextBox,
+    status: &nwg::Label,
+    state: &State,
+    candidates: Vec<DiskCandidate>,
+) {
     table.clear();
-    let devices = enumerate_disks().unwrap_or_default();
-    let mut candidates = Vec::new();
-    for dev in &devices {
-        candidates.push(DiskCandidate::probe(dev));
-    }
-
     for (row, c) in candidates.iter().enumerate() {
         let cells = [
             c.device
                 .drive_index
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "?".into()),
+            c.properties.media_type().to_string(),
             c.properties.bus_type.to_string(),
             format!("{:.1} GiB", c.properties.size_gib()),
             c.properties
@@ -574,27 +748,31 @@ fn refresh_ui(table: &nwg::ListView, details: &nwg::TextBox, status: &nwg::Label
     }
 
     let count = candidates.len();
-    *state.candidates.borrow_mut() = candidates;
+    *state.candidates.lock().unwrap() = candidates;
+    *state.selection.lock().unwrap() = 0;
 
     if count == 0 {
         details.set_text("No disks detected. Run StickDoctor as Administrator.");
         status.set_text("No disks detected.");
     } else {
-        status.set_text(&format!(
-            "{} disk(s) detected. Select your USB stick.",
-            count
-        ));
+        status.set_text(&format!("{} disk(s) detected. Select your media.", count));
         table.select_item(0, true);
         update_details(table, details, state);
     }
 }
 
 fn update_details(table: &nwg::ListView, details: &nwg::TextBox, state: &State) {
-    let candidates = state.candidates.borrow();
-    match table.selected_item().and_then(|i| candidates.get(i)) {
+    let candidates = state.candidates.lock().unwrap();
+    let selection = *state.selection.lock().unwrap();
+    match table
+        .selected_item()
+        .and_then(|i| candidates.get(i))
+        .or_else(|| candidates.get(selection))
+    {
         Some(c) => {
             let mut text = c.details_text();
             text.push_str(&format!("\nSafety: {}", c.safety.label()));
+            text.push_str(&format!("\nMedia: {}", c.properties.media_type()));
             if !c.can_repair() {
                 text.push_str("\n\nThis disk will NOT be repaired (safety rule).");
             }
@@ -625,7 +803,7 @@ fn on_repair(
         return;
     }
 
-    let candidates = state.candidates.borrow();
+    let candidates = state.candidates.lock().unwrap();
     let candidate = match table.selected_item().and_then(|i| candidates.get(i)) {
         Some(c) => c,
         None => {
@@ -639,7 +817,7 @@ fn on_repair(
         nwg::modal_error_message(
             window,
             "Repair refused",
-            "Only USB devices that are not the Windows system disk can be repaired.",
+            "Only removable media that is not the Windows system disk can be repaired.",
         );
         status.set_text("Repair refused (safety).");
         return;
@@ -652,7 +830,8 @@ fn on_repair(
         .clone()
         .unwrap_or_else(|| "Unknown".into());
     let size = candidate.properties.size_gib();
-    let drive = candidate.properties.bus_type;
+    let media = candidate.properties.media_type();
+    let bus = candidate.properties.bus_type;
 
     let fs_sel = fs_combo.selection().unwrap_or(0);
     let mut fs = match fs_sel {
@@ -670,7 +849,7 @@ fn on_repair(
             &nwg::MessageParams {
                 title: "FAT32 size limit",
                 content: &format!(
-                    "This stick is {:.1} GiB. Windows cannot format FAT32 above 32 GiB.\n\nFormat as exFAT instead?\n\nYes = exFAT, No = cancel",
+                    "This media is {:.1} GiB. Windows cannot format FAT32 above 32 GiB.\n\nFormat as exFAT instead?\n\nYes = exFAT, No = cancel",
                     size
                 ),
                 buttons: nwg::MessageButtons::YesNo,
@@ -696,8 +875,8 @@ fn on_repair(
         &nwg::MessageParams {
             title: "Confirm destructive operation",
             content: &format!(
-                "ALL DATA on this disk will be destroyed.\n\nDisk: PhysicalDrive{}\nModel: {}\nBus: {}\nSize: {:.1} GiB\nAction: {}\n\nContinue?",
-                index, model, drive, size, action
+                "ALL DATA on this media will be destroyed.\n\nDisk: PhysicalDrive{}\nModel: {}\nMedia: {}\nBus: {}\nSize: {:.1} GiB\nAction: {}\n\nContinue?",
+                index, model, media, bus, size, action
             ),
             buttons: nwg::MessageButtons::YesNo,
             icons: nwg::MessageIcons::Warning,
@@ -761,7 +940,7 @@ fn on_repair(
                     *g = if rebuild_only {
                         "Partition table rebuilt.".to_string()
                     } else {
-                        "Repair complete - the stick is ready.".to_string()
+                        "Repair complete - the media is ready.".to_string()
                     };
                 }
                 base_pct.store(100, Ordering::Relaxed);
