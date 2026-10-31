@@ -1,3 +1,8 @@
+//! Structured event log shared by the CLI and the GUI.
+//!
+//! @sd file module="crates/stickdoctor-core/src/log.rs" role="structured event log" entry="Logger::log" exit="Logger::render"
+//! @sd anchor name=core.log text="logging"
+
 use std::fmt;
 use std::time::{Duration, SystemTime};
 
@@ -45,7 +50,6 @@ pub struct LogEvent {
     pub level: LogLevel,
     pub timestamp: SystemTime,
     pub message: String,
-    pub detail: Option<String>,
 }
 
 impl LogEvent {
@@ -53,14 +57,7 @@ impl LogEvent {
         let secs = elapsed.as_secs_f64();
         let marker = self.level.mark();
         let tag = self.level.tag();
-        let detail = match &self.detail {
-            Some(d) => format!("  |  {}", d),
-            None => String::new(),
-        };
-        format!(
-            "{:>8.3}s  [{}] {}  {}{}",
-            secs, tag, marker, self.message, detail
-        )
+        format!("{:>8.3}s  [{}] {}  {}", secs, tag, marker, self.message)
     }
 }
 
@@ -81,22 +78,6 @@ impl Logger {
             level,
             timestamp: SystemTime::now(),
             message: message.into(),
-            detail: None,
-        });
-    }
-
-    pub fn log_detail(
-        &mut self,
-        level: LogLevel,
-        message: impl Into<String>,
-        detail: impl Into<String>,
-    ) {
-        self.ensure_start();
-        self.events.push(LogEvent {
-            level,
-            timestamp: SystemTime::now(),
-            message: message.into(),
-            detail: Some(detail.into()),
         });
     }
 

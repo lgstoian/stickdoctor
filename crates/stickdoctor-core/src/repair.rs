@@ -1,3 +1,24 @@
+//! The repair pipeline: safety -> unmount -> wipe -> delete layout ->
+//! create + format -> wait -> verify -> report.
+//!
+//! Success is decided by reading the result back, never by a tool's exit code.
+//!
+//! @sd file module="crates/stickdoctor-core/src/repair.rs" role="repair orchestration and verification" entry="execute_repair_with_progress" exit="VerificationOutcome::is_success"
+//! @sd anchor name=core.repair text="repair pipeline"
+//! @sd ref name=core.safety
+//! @sd ref name=core.format
+//! @sd flow id=repair.safety step=1 pipeline=repair label="Safety gate" next=repair.unmount
+//! @sd flow id=repair.unmount step=2 pipeline=repair label="Unmount volumes" next=repair.zero
+//! @sd flow id=repair.zero step=3 pipeline=repair label="Optional raw wipe" next=repair.delete
+//! @sd flow id=repair.delete step=4 pipeline=repair label="Delete layout" next=repair.create
+//! @sd flow id=repair.create step=5 pipeline=repair label="Create partition and format" next=repair.wait
+//! @sd flow id=repair.wait step=6 pipeline=repair label="Wait for volume" next=repair.verify
+//! @sd flow id=repair.verify step=7 pipeline=repair label="Verify filesystem" next=repair.report verify=repair-success
+//! @sd flow id=repair.report step=8 pipeline=repair label="Report"
+//! @sd verify id=repair-success fn="is_success" proves="a repair succeeded only if the filesystem was read back and matched" negative_test=verification_rejects_boot_sector_failure
+//! @sd verify id=partition-usable fn="layout_is_usable_mbr" proves="a created partition is a usable MBR partition" negative_test=layout_is_usable_mbr_rejects_gpt
+//! @sd hazard text="performs irreversible writes to a raw disk" guard="safety_check, self-elevation and user confirmation"
+
 use crate::error::{Error, Result};
 use crate::format;
 use crate::props::DiskProperties;
@@ -46,6 +67,15 @@ impl FsChoice {
             FsChoice::Ntfs => "NTFS",
         }
     }
+
+    /// MBR partition-type byte that matches the filesystem, so an exFAT/NTFS
+    /// repair does not leave a FAT32 type byte on the partition.
+    pub fn partition_type_byte(&self) -> u8 {
+        match self {
+            FsChoice::Fat32 => 0x0C,                  // FAT32 LBA
+            FsChoice::ExFat | FsChoice::Ntfs => 0x07, // NTFS / exFAT
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +97,52 @@ impl Default for RepairOptions {
             zero_sectors: false,
             rebuild_only: false,
         }
+    }
+}
+
+/// The result of the independent verification steps that decide whether a
+/// repair really succeeded.
+///
+/// `None` means "this check did not apply" (for example, no volume was
+/// registered so the read/write test could not run). Every check that *did* run
+/// must have passed, and at least one must have run: otherwise success would be
+/// reported for a repair that was never verified (a false green).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct VerificationOutcome {
+    pub boot_sector: Option<bool>,
+    pub volume_fs: Option<bool>,
+    pub read_write: Option<bool>,
+}
+
+impl VerificationOutcome {
+    fn checks(&self) -> [Option<bool>; 3] {
+        [self.boot_sector, self.volume_fs, self.read_write]
+    }
+
+    /// How many checks actually ran.
+    pub fn ran(&self) -> usize {
+        self.checks().iter().flatten().count()
+    }
+
+    /// True only when at least one check ran and every check passed.
+    pub fn is_success(&self) -> bool {
+        let checks = self.checks();
+        self.ran() > 0 && checks.iter().flatten().all(|ok| *ok)
+    }
+
+    /// The first failed check, as a message for the log and the returned error.
+    pub fn failure_reason(&self) -> String {
+        if let Some(false) = self.boot_sector {
+            return "the partition boot sector does not contain the requested filesystem signature"
+                .to_string();
+        }
+        if let Some(false) = self.volume_fs {
+            return "GetVolumeInformationW did not report the requested filesystem".to_string();
+        }
+        if let Some(false) = self.read_write {
+            return "the post-format read/write test failed".to_string();
+        }
+        "no verification check was run".to_string()
     }
 }
 
@@ -294,39 +370,81 @@ pub fn execute_repair_with_progress(
 
     let label = sanitize_label(&opts.label);
 
-    if diskpart_formatted {
-        // DiskPart already ran `format` in the same session as `create`.
-        on_stage("Verifying format...", 60);
-        if let Err(e) = format::verify_boot_sector(index, opts.fs.fmifs_name(), log) {
+    // ---- 5. format ----
+    if !diskpart_formatted {
+        if let Some(ref v) = volume {
+            on_stage(&format!("Formatting as {}...", opts.fs), 52);
+            format::reset_format_progress();
+            format::format_volume(v, opts.fs, &label, opts.quick, log)?;
+        } else {
+            // No volume yet (common on USB bridges): format the partition
+            // directly so the repair still produces a filesystem.
+            on_stage(&format!("Formatting partition as {}...", opts.fs), 52);
+            let script = format!(
+                "select disk {}\nselect partition 1\nformat fs={} label={} quick\n",
+                index,
+                opts.fs.fmifs_name(),
+                label
+            );
+            if let Err(e) = format::run_diskpart(&script) {
+                note(
+                    log,
+                    crate::log::LogLevel::Warn,
+                    &format!("partition format failed: {}", e),
+                );
+            }
+        }
+    }
+
+    // ---- 6. verify: every applicable check must pass ----
+    on_stage("Verifying...", 88);
+    let mut checks = VerificationOutcome::default();
+
+    // The boot sector is the authoritative check: it needs no mounted volume.
+    match format::verify_boot_sector(index, opts.fs.fmifs_name(), log) {
+        Ok(()) => checks.boot_sector = Some(true),
+        Err(e) => {
+            checks.boot_sector = Some(false);
             note(
                 log,
                 crate::log::LogLevel::Warn,
-                &format!("boot sector check: {}", e),
+                &format!("boot sector check failed: {}", e),
             );
         }
-    } else if let Some(ref v) = volume {
-        // ---- 5. format via fmifs / fallbacks ----
-        on_stage(&format!("Formatting as {}...", opts.fs), 52);
-        format::reset_format_progress();
-        format::format_volume(v, opts.fs, &label, opts.quick, log)?;
-    } else {
-        note(
-            log,
-            crate::log::LogLevel::Warn,
-            "No volume registered; the partition was formatted by DiskPart but \
-             cannot be formatted by the API either.",
-        );
     }
 
-    // ---- 6. verify the filesystem really exists ----
-    on_stage("Verifying...", 88);
     let root = volume.as_ref().and_then(|v| format::volume_root(v).ok());
     if let Some(ref r) = root {
-        if let Err(e) = format::verify_volume(r, opts.fs.fmifs_name(), log) {
-            note(log, crate::log::LogLevel::Warn, &format!("{}", e));
+        match format::verify_volume(r, opts.fs.fmifs_name(), log) {
+            Ok(()) => checks.volume_fs = Some(true),
+            Err(e) => {
+                checks.volume_fs = Some(false);
+                note(
+                    log,
+                    crate::log::LogLevel::Warn,
+                    &format!("volume check failed: {}", e),
+                );
+            }
         }
         on_stage("Testing read/write...", 94);
-        let _ = format::verify_read_write(r, log);
+        match format::verify_read_write(r, log) {
+            Ok(()) => checks.read_write = Some(true),
+            Err(e) => {
+                checks.read_write = Some(false);
+                note(
+                    log,
+                    crate::log::LogLevel::Warn,
+                    &format!("read/write test failed: {}", e),
+                );
+            }
+        }
+    }
+
+    if !checks.is_success() {
+        let msg = format!("Repair failed verification: {}", checks.failure_reason());
+        note(log, crate::log::LogLevel::Error, &msg);
+        on_stage("Verification failed.", 96);
+        return Err(Error::Internal(msg));
     }
 
     note(
@@ -448,6 +566,30 @@ fn ioctl_delete_layout(index: u32) -> Result<()> {
     }
 }
 
+/// Build the diskpart script that resets and rebuilds the partition table.
+///
+/// `rebuild_only` skips the `format` command entirely; otherwise `quick`
+/// selects a quick format. Pure so the exact script can be asserted in tests.
+fn create_partition_script(index: u32, opts: &RepairOptions) -> String {
+    let label = sanitize_label(&opts.label);
+    let head = format!(
+        "select disk {index}\nonline disk\nattributes disk clear readonly\nclean\ncreate partition primary\n"
+    );
+    if opts.rebuild_only {
+        format!("{head}assign\nrescan\n")
+    } else if opts.quick {
+        format!(
+            "{head}format fs={} label={label} quick\nassign\nrescan\n",
+            opts.fs.fmifs_name()
+        )
+    } else {
+        format!(
+            "{head}format fs={} label={label}\nassign\nrescan\n",
+            opts.fs.fmifs_name()
+        )
+    }
+}
+
 /// Create one primary partition and assign a drive letter.
 ///
 /// `diskpart clean` must run in the same DiskPart session as
@@ -464,13 +606,7 @@ fn create_partition(
     opts: &RepairOptions,
     log: &SharedLog,
 ) -> Result<bool> {
-    let label = sanitize_label(&opts.label);
-    let script = format!(
-        "select disk {}\nonline disk\nattributes disk clear readonly\nclean\ncreate partition primary\nformat fs={} label={} quick\nassign\nrescan\n",
-        index,
-        opts.fs.fmifs_name(),
-        label
-    );
+    let script = create_partition_script(index, opts);
     let formatted = match format::run_diskpart(&script) {
         Ok(out) => {
             let formatted = out.to_lowercase().contains("successfully formatted");
@@ -533,7 +669,7 @@ fn create_partition(
         crate::log::LogLevel::Warn,
         "DiskPart did not create a partition; trying the ioctl layout writer.",
     );
-    match create_partition_ioctl(index, disk_size, log) {
+    match create_partition_ioctl(index, disk_size, opts.fs.partition_type_byte(), log) {
         Ok(()) if partition_exists(index) => {
             note(
                 log,
@@ -560,7 +696,7 @@ fn create_partition(
         crate::log::LogLevel::Warn,
         "Falling back to a raw MBR write.",
     );
-    write_raw_mbr(index, disk_size, log)?;
+    write_raw_mbr(index, disk_size, opts.fs.partition_type_byte(), log)?;
     let _ = format::run_diskpart(&format!("select disk {}\nrescan\n", index));
     if !partition_exists(index) {
         return Err(Error::Internal(
@@ -577,6 +713,21 @@ fn create_partition(
         "Partition created (raw MBR)",
     );
     Ok(false)
+}
+
+/// Decide whether a decoded drive layout is a usable single-partition MBR.
+///
+/// Pure so it can be tested. `partition_exists` used to accept any entry with a
+/// non-zero length, including GPT entries, so the partition-creation fallback
+/// could look successful when it was not.
+pub(crate) fn layout_is_usable_mbr(
+    partition_style: u32,
+    partition_count: u32,
+    first_offset: i64,
+    first_length: i64,
+) -> bool {
+    const STYLE_MBR: u32 = 0;
+    partition_style == STYLE_MBR && partition_count > 0 && first_offset > 0 && first_length > 0
 }
 
 /// Read the real partition layout from the disk.
@@ -606,13 +757,27 @@ fn partition_exists(index: u32) -> bool {
     if ok == 0 || (returned as usize) < std::mem::size_of::<DRIVE_LAYOUT_INFORMATION_EX>() {
         return false;
     }
-    let layout = unsafe { &*(buf.as_ptr() as *const DRIVE_LAYOUT_INFORMATION_EX) };
-    layout.PartitionCount > 0 && layout.PartitionEntry[0].PartitionLength > 0
+    let layout =
+        unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const DRIVE_LAYOUT_INFORMATION_EX) };
+    let (offset, length) = if layout.PartitionCount > 0 {
+        (
+            layout.PartitionEntry[0].StartingOffset,
+            layout.PartitionEntry[0].PartitionLength,
+        )
+    } else {
+        (0, 0)
+    };
+    layout_is_usable_mbr(layout.PartitionStyle, layout.PartitionCount, offset, length)
 }
 
 /// Build the partition table with `IOCTL_DISK_CREATE_DISK` +
 /// `IOCTL_DISK_SET_DRIVE_LAYOUT_EX`. Locale-independent and fully verifiable.
-fn create_partition_ioctl(index: u32, disk_size: u64, log: &SharedLog) -> Result<()> {
+fn create_partition_ioctl(
+    index: u32,
+    disk_size: u64,
+    partition_type: u8,
+    log: &SharedLog,
+) -> Result<()> {
     use windows_sys::Win32::System::Ioctl::{
         DRIVE_LAYOUT_INFORMATION_EX, DRIVE_LAYOUT_INFORMATION_EX_0, DRIVE_LAYOUT_INFORMATION_MBR,
         IOCTL_DISK_CREATE_DISK, IOCTL_DISK_SET_DRIVE_LAYOUT_EX, IOCTL_DISK_UPDATE_PROPERTIES,
@@ -654,38 +819,39 @@ fn create_partition_ioctl(index: u32, disk_size: u64, log: &SharedLog) -> Result
     let total_sectors = (disk_size / 512) as i64;
     let length_sectors = (total_sectors - start_lba).max(1);
 
-    let layout = DRIVE_LAYOUT_INFORMATION_EX {
-        PartitionStyle: PARTITION_STYLE_MBR as u32,
-        PartitionCount: 1,
-        Anonymous: DRIVE_LAYOUT_INFORMATION_EX_0 {
-            Mbr: DRIVE_LAYOUT_INFORMATION_MBR {
-                Signature: 0xDEAD_BEEF,
-                CheckSum: 0,
-            },
+    // Zero-initialise so the union bytes the kernel does not read (the GPT
+    // half of the MBR layout) are defined rather than stack garbage.
+    let mut layout: DRIVE_LAYOUT_INFORMATION_EX = unsafe { std::mem::zeroed() };
+    layout.PartitionStyle = PARTITION_STYLE_MBR as u32;
+    layout.PartitionCount = 1;
+    layout.Anonymous = DRIVE_LAYOUT_INFORMATION_EX_0 {
+        Mbr: DRIVE_LAYOUT_INFORMATION_MBR {
+            Signature: 0xDEAD_BEEF,
+            CheckSum: 0,
         },
-        PartitionEntry: [PARTITION_INFORMATION_EX {
-            PartitionStyle: PARTITION_STYLE_MBR,
-            StartingOffset: start_lba * 512,
-            PartitionLength: length_sectors * 512,
-            PartitionNumber: 1,
-            RewritePartition: 1,
-            IsServicePartition: 0,
-            Anonymous: PARTITION_INFORMATION_EX_0 {
-                Mbr: PARTITION_INFORMATION_MBR {
-                    PartitionType: 0x0C, // FAT32 LBA
-                    BootIndicator: 0,
-                    RecognizedPartition: 1,
-                    HiddenSectors: start_lba as u32,
-                    PartitionId: windows_sys::core::GUID {
-                        data1: 0,
-                        data2: 0,
-                        data3: 0,
-                        data4: [0; 8],
-                    },
+    };
+    layout.PartitionEntry = [PARTITION_INFORMATION_EX {
+        PartitionStyle: PARTITION_STYLE_MBR,
+        StartingOffset: start_lba * 512,
+        PartitionLength: length_sectors * 512,
+        PartitionNumber: 1,
+        RewritePartition: 1,
+        IsServicePartition: 0,
+        Anonymous: PARTITION_INFORMATION_EX_0 {
+            Mbr: PARTITION_INFORMATION_MBR {
+                PartitionType: partition_type,
+                BootIndicator: 0,
+                RecognizedPartition: 1,
+                HiddenSectors: start_lba as u32,
+                PartitionId: windows_sys::core::GUID {
+                    data1: 0,
+                    data2: 0,
+                    data3: 0,
+                    data4: [0; 8],
                 },
             },
-        }],
-    };
+        },
+    }];
 
     let ok = unsafe {
         DeviceIoControl(
@@ -728,7 +894,7 @@ fn create_partition_ioctl(index: u32, disk_size: u64, log: &SharedLog) -> Result
 
 /// Build a single-partition MBR starting at LBA 2048 (1 MiB aligned).
 /// Returns `None` if the disk is too small to partition.
-pub(crate) fn build_mbr(disk_size: u64) -> Option<([u8; 512], u32, u32)> {
+pub(crate) fn build_mbr(disk_size: u64, partition_type: u8) -> Option<([u8; 512], u32, u32)> {
     if disk_size < 1024 * 1024 {
         return None;
     }
@@ -745,7 +911,7 @@ pub(crate) fn build_mbr(disk_size: u64) -> Option<([u8; 512], u32, u32)> {
     mbr[e + 1] = 0xFE; // CHS start (dummy, LBA is authoritative)
     mbr[e + 2] = 0xFF;
     mbr[e + 3] = 0xFF;
-    mbr[e + 4] = 0x0C; // FAT32 LBA
+    mbr[e + 4] = partition_type; // filesystem-matching partition type
     mbr[e + 5] = 0xFE; // CHS end (dummy)
     mbr[e + 6] = 0xFF;
     mbr[e + 7] = 0xFF;
@@ -758,10 +924,10 @@ pub(crate) fn build_mbr(disk_size: u64) -> Option<([u8; 512], u32, u32)> {
 }
 
 /// Last resort: write a valid MBR by hand. Independent of DiskPart and VDS.
-fn write_raw_mbr(index: u32, disk_size: u64, log: &SharedLog) -> Result<()> {
+fn write_raw_mbr(index: u32, disk_size: u64, partition_type: u8, log: &SharedLog) -> Result<()> {
     use windows_sys::Win32::Storage::FileSystem::FlushFileBuffers;
 
-    let (mbr, start_lba, sectors) = build_mbr(disk_size)
+    let (mbr, start_lba, sectors) = build_mbr(disk_size, partition_type)
         .ok_or_else(|| Error::Internal("disk size is unknown or too small to partition".into()))?;
 
     let h = open_drive(index)?;
@@ -920,7 +1086,8 @@ mod tests {
     #[test]
     fn mbr_has_one_fat32_partition_at_1mib() {
         let size = 32u64 * 1024 * 1024 * 1024;
-        let (mbr, start, sectors) = build_mbr(size).expect("mbr");
+        let (mbr, start, sectors) =
+            build_mbr(size, FsChoice::Fat32.partition_type_byte()).expect("mbr");
         assert_eq!(mbr[510], 0x55);
         assert_eq!(mbr[511], 0xAA);
         assert_eq!(mbr[446], 0x00); // not bootable
@@ -934,10 +1101,149 @@ mod tests {
     }
 
     #[test]
+    fn mbr_uses_the_requested_partition_type() {
+        // The fallback writers must not leave a FAT32 type byte on an exFAT/NTFS
+        // partition.
+        let size = 32u64 * 1024 * 1024 * 1024;
+        let (fat, _, _) = build_mbr(size, FsChoice::Fat32.partition_type_byte()).unwrap();
+        let (exfat, _, _) = build_mbr(size, FsChoice::ExFat.partition_type_byte()).unwrap();
+        let (ntfs, _, _) = build_mbr(size, FsChoice::Ntfs.partition_type_byte()).unwrap();
+        assert_eq!(fat[446 + 4], 0x0C);
+        assert_eq!(exfat[446 + 4], 0x07);
+        assert_eq!(ntfs[446 + 4], 0x07);
+    }
+
+    #[test]
+    fn create_partition_script_formats_quick_by_default() {
+        let opts = RepairOptions::default();
+        let script = create_partition_script(3, &opts);
+        assert!(script.contains("clean\ncreate partition primary\n"));
+        assert!(script.contains("format fs=FAT32 label=STICK quick\n"));
+        assert!(script.contains("assign\nrescan\n"));
+    }
+
+    #[test]
+    fn create_partition_script_skips_format_for_rebuild_only() {
+        let opts = RepairOptions {
+            rebuild_only: true,
+            ..Default::default()
+        };
+        let script = create_partition_script(3, &opts);
+        assert!(script.contains("create partition primary\n"));
+        assert!(!script.contains("format fs="));
+    }
+
+    #[test]
+    fn create_partition_script_full_format_when_not_quick() {
+        let opts = RepairOptions {
+            quick: false,
+            fs: FsChoice::ExFat,
+            ..Default::default()
+        };
+        let script = create_partition_script(3, &opts);
+        assert!(script.contains("format fs=exFAT label=STICK\n"));
+        assert!(!script.contains(" quick\n"));
+    }
+
+    #[test]
     fn mbr_rejects_unusable_disks() {
-        assert!(build_mbr(0).is_none());
-        assert!(build_mbr(4096).is_none());
+        assert!(build_mbr(0, 0x0C).is_none());
+        assert!(build_mbr(4096, 0x0C).is_none());
         // 1 MiB disk has no room after the 1 MiB alignment.
-        assert!(build_mbr(1024 * 1024).is_none());
+        assert!(build_mbr(1024 * 1024, 0x0C).is_none());
+    }
+
+    // ---- verification decision (the false-green guard) ----
+
+    #[test]
+    fn verification_requires_at_least_one_passing_check() {
+        assert!(!VerificationOutcome::default().is_success());
+        assert_eq!(VerificationOutcome::default().ran(), 0);
+    }
+
+    #[test]
+    fn verification_accepts_all_passing_checks() {
+        let v = VerificationOutcome {
+            boot_sector: Some(true),
+            volume_fs: Some(true),
+            read_write: Some(true),
+        };
+        assert!(v.is_success());
+        assert_eq!(v.ran(), 3);
+    }
+
+    #[test]
+    fn verification_accepts_boot_sector_only_when_no_volume() {
+        // The documented case: Windows never registered a volume, so the boot
+        // sector is the only signal and it is authoritative.
+        let v = VerificationOutcome {
+            boot_sector: Some(true),
+            volume_fs: None,
+            read_write: None,
+        };
+        assert!(v.is_success());
+    }
+
+    #[test]
+    fn verification_rejects_boot_sector_failure() {
+        let v = VerificationOutcome {
+            boot_sector: Some(false),
+            volume_fs: Some(true),
+            read_write: Some(true),
+        };
+        assert!(!v.is_success());
+        assert!(v.failure_reason().contains("boot sector"));
+    }
+
+    #[test]
+    fn verification_rejects_volume_fs_failure() {
+        let v = VerificationOutcome {
+            boot_sector: Some(true),
+            volume_fs: Some(false),
+            read_write: Some(true),
+        };
+        assert!(!v.is_success());
+        assert!(v.failure_reason().contains("GetVolumeInformationW"));
+    }
+
+    #[test]
+    fn verification_rejects_read_write_failure() {
+        let v = VerificationOutcome {
+            boot_sector: Some(true),
+            volume_fs: Some(true),
+            read_write: Some(false),
+        };
+        assert!(!v.is_success());
+        assert!(v.failure_reason().contains("read/write"));
+    }
+
+    #[test]
+    fn verification_rejects_boot_sector_only_failure() {
+        let v = VerificationOutcome {
+            boot_sector: Some(false),
+            volume_fs: None,
+            read_write: None,
+        };
+        assert!(!v.is_success());
+    }
+
+    // ---- partition usability ----
+
+    #[test]
+    fn layout_is_usable_mbr_accepts_a_real_partition() {
+        assert!(layout_is_usable_mbr(0, 1, 2048 * 512, 100_000 * 512));
+    }
+
+    #[test]
+    fn layout_is_usable_mbr_rejects_gpt() {
+        // A GPT entry would have fooled the old `PartitionCount > 0` check.
+        assert!(!layout_is_usable_mbr(1, 1, 1024 * 1024, 100_000 * 512));
+    }
+
+    #[test]
+    fn layout_is_usable_mbr_rejects_empty_or_zero_sized() {
+        assert!(!layout_is_usable_mbr(0, 0, 0, 0));
+        assert!(!layout_is_usable_mbr(0, 1, 0, 100));
+        assert!(!layout_is_usable_mbr(0, 1, 2048 * 512, 0));
     }
 }

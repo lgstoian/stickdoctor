@@ -29,6 +29,9 @@ jobs:
       - name: Tests
         run: cargo test --all
 
+      - name: Agent breadcrumbs
+        run: cargo run -p stickdoctor-cli -- agent-map --json
+
       - name: Release build
         run: cargo build --release
 

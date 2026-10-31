@@ -1,3 +1,10 @@
+//! StickDoctor native Win32 GUI.
+//!
+//! @sd file module="crates/stickdoctor-app/src/main.rs" role="native Win32 GUI" entry="main" exit="build_ui"
+//! @sd anchor name=app.main text="GUI"
+//! @sd ref name=core.lib
+//! @sd hazard text="performs irreversible writes" guard="self-elevation, can_repair and a confirmation dialog"
+
 #![windows_subsystem = "windows"]
 
 use native_windows_gui as nwg;
@@ -16,7 +23,10 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const APP_TITLE: &str = "StickDoctor";
 
 fn main() {
-    if !is_elevated() && !relaunch_elevated() {
+    if !is_elevated() {
+        // Launch the elevated copy and exit. A non-elevated parent cannot read
+        // raw disks and would only add a second, misleading window.
+        let _ = relaunch_elevated();
         return;
     }
 
@@ -523,7 +533,7 @@ fn build_ui() {
                 } else if handle == copy_btn {
                     copy_log(window_h.as_ref(), &log_text, &status);
                 } else if handle == scan_btn {
-                    run_tool(st.clone(), sender, "scan", move |idx, log| {
+                    run_tool(st.clone(), sender, "scan", false, move |idx, log| {
                         let found = scan_lost_partitions(idx);
                         if found.is_empty() {
                             log.lock().unwrap().info("No lost partitions found.");
@@ -536,14 +546,14 @@ fn build_ui() {
                         }
                     });
                 } else if handle == clear_ro_btn {
-                    run_tool(st.clone(), sender, "clear-readonly", |idx, log| {
+                    run_tool(st.clone(), sender, "clear-readonly", true, |idx, log| {
                         for m in clear_read_only(idx).unwrap_or_else(|e| vec![e.to_string()]) {
                             log.lock().unwrap().info(m);
                         }
                     });
                 } else if handle == chkdsk_btn {
                     let st_for_tool = st.clone();
-                    run_tool(st.clone(), sender, "chkdsk", move |idx, log| {
+                    run_tool(st.clone(), sender, "chkdsk", true, move |idx, log| {
                         let letter = selected_letter(&st_for_tool, idx);
                         match letter {
                             Some(l) => match run_chkdsk(&l) {
@@ -568,7 +578,7 @@ fn build_ui() {
                         },
                     );
                     if choice == nwg::MessageChoice::Yes {
-                        run_tool(st.clone(), sender, "overwrite", |_idx, log| {
+                        run_tool(st.clone(), sender, "overwrite", true, |_idx, log| {
                             match stickdoctor_core::full_overwrite(_idx, log) {
                                 Ok(()) => {}
                                 Err(e) => log.lock().unwrap().error(e.to_string()),
@@ -586,11 +596,8 @@ fn build_ui() {
                         },
                     );
                     if choice == nwg::MessageChoice::Yes {
-                        run_tool(
-                            st.clone(),
-                            sender,
-                            "capacity",
-                            |idx, log| match verify_capacity(idx, log) {
+                        run_tool(st.clone(), sender, "capacity", true, |idx, log| {
+                            match verify_capacity(idx, log) {
                                 Ok(r) => {
                                     if r.genuine {
                                         log.lock().unwrap().success("Capacity test passed.");
@@ -602,8 +609,8 @@ fn build_ui() {
                                     }
                                 }
                                 Err(e) => log.lock().unwrap().error(e.to_string()),
-                            },
-                        );
+                            }
+                        });
                     }
                 }
             }
@@ -681,11 +688,31 @@ fn start_refresh(state: Arc<State>, sender: nwg::NoticeSender) {
 }
 
 /// Run a tool in the background thread, logging its output.
-fn run_tool<F>(state: Arc<State>, sender: nwg::NoticeSender, name: &str, f: F)
+///
+/// `require_safe` gates the tool behind the same removable-media / system-disk
+/// check the repair engine uses, so a destructive or modifying tool cannot be
+/// pointed at a fixed or system disk.
+fn run_tool<F>(state: Arc<State>, sender: nwg::NoticeSender, name: &str, require_safe: bool, f: F)
 where
     F: FnOnce(u32, &SharedLog) + Send + 'static,
 {
-    let index = match selected_index(&state) {
+    let candidate = match selected_candidate(&state) {
+        Some(c) => c,
+        None => return,
+    };
+    // Never run a tool while a repair holds the disk and the volume locks.
+    if state.busy.load(Ordering::Relaxed) {
+        *state.stage_slot.lock().unwrap() = "A repair is already running.".to_string();
+        sender.notice();
+        return;
+    }
+    if require_safe && !candidate.can_repair() {
+        *state.stage_slot.lock().unwrap() =
+            format!("Refused {}: {}", name, candidate.safety.long_label());
+        sender.notice();
+        return;
+    }
+    let index = match candidate.device.drive_index {
         Some(i) => i,
         None => return,
     };
@@ -700,13 +727,14 @@ where
     });
 }
 
-fn selected_index(state: &State) -> Option<u32> {
+/// The candidate the list selection points at (falling back to the first row).
+fn selected_candidate(state: &State) -> Option<DiskCandidate> {
     let candidates = state.candidates.lock().unwrap();
     let selection = *state.selection.lock().unwrap();
     candidates
         .get(selection)
-        .and_then(|c| c.device.drive_index)
-        .or_else(|| candidates.first().and_then(|c| c.device.drive_index))
+        .or_else(|| candidates.first())
+        .cloned()
 }
 
 fn selected_letter(state: &State, index: u32) -> Option<String> {

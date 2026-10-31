@@ -1,3 +1,13 @@
+//! StickDoctor core: the UI-agnostic disk engine. The CLI and GUI are thin
+//! front ends over the items re-exported here.
+//!
+//! @sd file module="crates/stickdoctor-core/src/lib.rs" role="public API and DiskCandidate" entry="DiskCandidate::probe" exit="details_text"
+//! @sd anchor name=core.lib text="core crate root"
+//! @sd flow id=core.enumerate step=1 pipeline=core label="enumerate physical drives" next=core.probe
+//! @sd flow id=core.probe step=2 pipeline=core label="probe one disk" next=core.diagnose
+//! @sd flow id=core.diagnose step=3 pipeline=core label="diagnose layout and volumes" next=core.repair
+//! @sd flow id=core.repair step=4 pipeline=core label="repair" verify=repair-success
+
 mod enumerate;
 mod error;
 mod format;
@@ -21,8 +31,9 @@ pub use log::{LogEvent, LogLevel};
 pub use props::{inspect_properties, BusType, DiskProperties, MediaType};
 pub use repair::{
     execute_repair, execute_repair_with_progress, FsChoice, RepairOptions, StageCallback,
+    VerificationOutcome,
 };
-pub use safety::{safety_check, SafetyStatus};
+pub use safety::{ensure_safe_for_tool, safety_check, system_drive_letter, SafetyStatus};
 pub use tools::{
     clear_read_only, full_overwrite, run_chkdsk, scan_lost_partitions, verify_capacity,
     CapacityReport, LostPartition,

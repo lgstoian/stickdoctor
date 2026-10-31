@@ -1,0 +1,10 @@
+[package]
+name = "stickdoctor-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description.workspace = true
+
+# No dependencies on purpose: this crate only reads text files and parses
+# comments, so it can never introduce a supply-chain or license question.
+[dependencies]

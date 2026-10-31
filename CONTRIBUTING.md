@@ -27,6 +27,9 @@ cargo fmt --all -- --check
 * `cargo clippy --all-targets -- -D warnings`
 * `cargo test`
 * If you touched disk I/O, describe the hardware you tested on.
+* If you touched a module, keep its `@sd file` breadcrumb accurate and run
+  `cargo run -p stickdoctor-cli -- agent-map --write`. See
+  [docs/AGENT_ANNOTATIONS.md](docs/AGENT_ANNOTATIONS.md).
 
 ## Safety rules for changes
 

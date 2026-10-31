@@ -79,7 +79,8 @@ Users should not run an unsigned binary they have not verified.
 
 ### S7 — FFI memory safety (Informational, reviewed)
 
-There are 66 `unsafe` blocks, all confined to Win32 calls. Invariants:
+There are 112 `unsafe` blocks (core, CLI and GUI, including tests), all confined
+to Win32 calls. Invariants:
 
 - every output buffer is sized and its `bytes returned` is checked,
 - `VOLUME_DISK_EXTENTS` is decoded with explicit offsets and a bounds check,
@@ -96,12 +97,43 @@ licenses, banned crates, sources). `winapi 0.3` is pulled in by
 at the time of writing and is retained because it is the only practical backend
 for the native controls. Any future advisory is tracked in `deny.toml`.
 
+### S9 — Binary planting via `chkdsk` (Medium, fixed)
+
+`run_chkdsk` used `Command::new("chkdsk")`, which searches PATH and the current
+directory. A planted `chkdsk.exe` next to the executable would have run with
+Administrator rights — the same class as S1.
+
+**Fix:** `chkdsk.exe` is resolved from `%SystemRoot%\System32\`
+(`format::system32`), like `diskpart.exe` and `format.com`. The `@sd` guard now
+rejects a bare `Command::new("chkdsk")` anywhere in the sources.
+
+### S10 — System-disk identity read from the wrong ABI field (High, fixed)
+
+`STORAGE_DEVICE_NUMBER` is `{ DWORD DeviceType; DWORD DeviceNumber;
+DWORD PartitionNumber; }` — 12 bytes, with `DeviceNumber` at offset 4. Both
+`safety.rs` and `props.rs` declared an 8-byte struct (`device_number`,
+`partition_number`) and read offset 0, i.e. `DeviceType`. The IOCTL therefore
+failed for an 8-byte buffer, `returned` stayed 0, and `is_system_disk` returned
+`Ok(false)` — so the "never touch the disk that hosts Windows" invariant was
+effectively disabled.
+
+**Fix:** both use the `windows-sys` `STORAGE_DEVICE_NUMBER` type, and
+`is_system_disk` fails closed when either number cannot be determined. The
+12-byte size is asserted in `props::ffi_layout::struct_sizes_match_the_windows_abi`,
+and the `@sd` guard rejects a hand-rolled `DevNum`/`StorageDeviceNumber`.
+
 ## Defences that are not security controls
 
 The safety gate (refuse non-USB disks and the Windows system disk) is a
 **safety** control, not a security boundary. It is checked twice — in the UI and
 again inside the repair engine — so a UI bug cannot bypass it, but it is not
 designed to resist a determined attacker who already controls the machine.
+
+Since S10 the gate also fails **closed**: if the storage device number of the
+target or of the Windows volume cannot be read, the operation is refused rather
+than assumed safe. The same gate (`ensure_safe_for_tool`) protects the
+disk-modifying tools (full overwrite, capacity test, clear-readonly, `chkdsk`)
+in both the GUI and the CLI.
 
 ## Verification
 
@@ -124,3 +156,5 @@ cargo clippy --all-targets -- -D warnings
 | S6 unsigned binaries | Informational | Accepted, documented |
 | S7 FFI memory safety | Informational | Reviewed |
 | S8 supply chain | Informational | Monitored in CI |
+| S9 chkdsk binary planting | Medium | Fixed |
+| S10 system-disk ABI field | High | Fixed |

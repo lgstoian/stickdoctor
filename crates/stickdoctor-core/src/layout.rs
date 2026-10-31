@@ -1,3 +1,9 @@
+//! Pure MBR / GPT / isohybrid parser plus the read-only sector-zero reader.
+//!
+//! @sd file module="crates/stickdoctor-core/src/layout.rs" role="partition table detection" entry="inspect_sector_zero" exit="analyze"
+//! @sd anchor name=core.layout text="layout analysis"
+//! @sd ref name=core.repair
+
 use std::ptr;
 use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{

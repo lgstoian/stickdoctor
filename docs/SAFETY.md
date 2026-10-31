@@ -7,6 +7,9 @@ StickDoctor performs irreversible writes to raw disks. Read this before using it
 * It will not touch a disk that is not on the USB bus.
 * It will not touch the disk that hosts Windows (checked by comparing storage
   device numbers, both in the UI and again inside the repair engine).
+* It will not run a destructive tool (full overwrite, capacity test,
+  clear-readonly, `chkdsk`) on a disk that is not removable media — the same
+  gate protects the repair path.
 * It will not run without Administrator rights.
 * It will not report success unless it has read the filesystem back and
   confirmed it matches what you asked for.

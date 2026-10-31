@@ -14,6 +14,7 @@ crates/
     error.rs            error type + Win32 message mapping
   stickdoctor-cli/      thin CLI over the core
   stickdoctor-app/      native Win32 GUI (native-windows-gui)
+  stickdoctor-agent/    @sd annotation parser + false-green guard (no deps)
 ```
 
 ## Repair pipeline
@@ -41,6 +42,22 @@ before the next runs:
 
 Step 8 is what makes the tool trustworthy: it never reports success based only
 on a tool's exit code.
+
+## Verification is a decision, not a log line
+
+`execute_repair_with_progress()` collects the results of three independent
+checks into a `VerificationOutcome` and returns `Err` unless
+`VerificationOutcome::is_success()` holds:
+
+* the partition boot sector holds the requested filesystem signature
+  (`boot_sector_matches`) — works without a mounted volume,
+* `GetVolumeInformationW` reports the requested filesystem,
+* the post-format write/read-back test passes.
+
+`is_success()` requires at least one check to have run *and* every check to have
+passed, so an empty outcome can never read as success. Each rule is guarded by a
+`@sd verify` annotation with a negative test; see
+[`docs/AGENT_ANNOTATIONS.md`](AGENT_ANNOTATIONS.md).
 
 ## Why diskpart for layout but fmifs for format
 

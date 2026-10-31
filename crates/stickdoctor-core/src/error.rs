@@ -1,4 +1,9 @@
-﻿use std::fmt;
+﻿//! Error type plus Win32 message mapping.
+//!
+//! @sd file module="crates/stickdoctor-core/src/error.rs" role="error mapping" entry="last_error" exit="win32_error_message"
+//! @sd anchor name=core.error text="errors"
+
+use std::fmt;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -6,7 +11,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     Win32(u32, String),
     Io(std::io::Error),
-    InvalidDevice(String),
     Refused(String),
     Internal(String),
 }
@@ -16,7 +20,6 @@ impl fmt::Display for Error {
         match self {
             Error::Win32(code, msg) => write!(f, "Win32 error {code}: {msg}"),
             Error::Io(e) => write!(f, "IO error: {e}"),
-            Error::InvalidDevice(msg) => write!(f, "Invalid device: {msg}"),
             Error::Refused(msg) => write!(f, "Refused: {msg}"),
             Error::Internal(msg) => write!(f, "Internal error: {msg}"),
         }

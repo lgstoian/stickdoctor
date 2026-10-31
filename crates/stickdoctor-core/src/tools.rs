@@ -4,6 +4,12 @@
 //! lost partition tables (TestDisk-style search), write protection at the
 //! *volume* level, filesystem repair with `chkdsk`, counterfeit-capacity
 //! detection, and full-overwrite formatting (SD Association formatter style).
+//!
+//! @sd file module="crates/stickdoctor-core/src/tools.rs" role="diagnostic and repair tools" entry="scan_lost_partitions" exit="full_overwrite"
+//! @sd anchor name=core.tools text="extra tools"
+//! @sd verify id=capacity-test fn="capacity_offsets" proves="counterfeit-capacity offsets are distinct, aligned and in bounds" negative_test=capacity_offsets_are_distinct_and_in_bounds
+//! @sd invariant id=INV-3 text="Disk-modifying tools run only on removable media" test=require_safe_refuses_non_safe_statuses
+//! @sd hazard text="writes test patterns to the media" guard="safety gate (removable media only) and explicit user confirmation"
 
 use crate::error::{Error, Result};
 use std::ptr;
@@ -135,6 +141,7 @@ fn classify_sector(buf: &[u8; 2048]) -> Option<(&'static str, &'static str)> {
 /// Clear the read-only attribute at both the disk and volume level.
 /// Returns a list of messages describing what was done / what failed.
 pub fn clear_read_only(index: u32) -> Result<Vec<String>> {
+    crate::safety::ensure_safe_for_tool(index)?;
     let mut messages = Vec::new();
 
     // 1. Disk-level attribute via diskpart (handles the VDS "read-only" bit).
@@ -190,13 +197,27 @@ pub fn clear_read_only(index: u32) -> Result<Vec<String>> {
 pub fn run_chkdsk(letter: &str) -> Result<String> {
     use std::process::Command;
     let drive = format!("{}:", letter);
-    let out = Command::new("chkdsk").arg(&drive).arg("/f").output();
+    // Resolve chkdsk from System32 like diskpart/format.com: a bare
+    // `Command::new("chkdsk")` would search PATH and the current directory.
+    let out = Command::new(crate::format::system32("chkdsk.exe"))
+        .arg(&drive)
+        .arg("/f")
+        .output();
     match out {
-        Ok(o) => Ok(format!(
-            "{}{}",
-            String::from_utf8_lossy(&o.stdout),
-            String::from_utf8_lossy(&o.stderr)
-        )),
+        Ok(o) => {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            // chkdsk exits 1 when it fixed errors, so a non-zero status is not
+            // always a failure — but it must not be reported silently.
+            if o.status.success() {
+                Ok(text)
+            } else {
+                Ok(format!("chkdsk exited with {}:\n{}", o.status, text))
+            }
+        }
         Err(e) => Err(Error::Io(e)),
     }
 }
@@ -213,26 +234,53 @@ pub struct CapacityReport {
     pub tested_offsets: Vec<u64>,
 }
 
+/// The byte offsets (25/50/75/95 %) at which the counterfeit test writes a
+/// marker.
+///
+/// Pure and separate so the offsets can be checked for distinctness: two equal
+/// offsets would make the capacity test vacuous (a false green).
+pub(crate) fn capacity_offsets(size: u64) -> Vec<u64> {
+    if size == 0 {
+        return Vec::new();
+    }
+    [0.25f64, 0.5, 0.75, 0.95]
+        .iter()
+        .map(|frac| ((size as f64 * frac) / 512.0).floor() as u64 * 512)
+        .collect()
+}
+
+/// A distinct marker per offset. The index is baked in so a fake card that
+/// wraps a write back to an earlier offset still reads a different value.
+pub(crate) fn capacity_marker(index: usize) -> u64 {
+    0x5344_5443_4100_0000u64 + index as u64 // "SDTCA" + index
+}
+
+/// Whether the capacity-test offsets for `size` are distinct enough to be
+/// meaningful. A tiny disk floors every fraction to the same sector, which would
+/// make the test vacuous (and falsely report counterfeit).
+pub(crate) fn capacity_offsets_are_distinct(size: u64) -> bool {
+    let offsets = capacity_offsets(size);
+    offsets.len() == 4 && offsets.windows(2).all(|w| w[0] != w[1])
+}
+
 /// Write a recognizable pattern at several offsets and read it back.
 /// Counterfeit cards report a larger capacity than they physically have and
 /// silently overwrite earlier data, so a mismatch means the card is fake.
 ///
 /// This WRITES to the media. Only run it on a card you do not need the data on.
 pub fn verify_capacity(index: u32, log: &crate::SharedLog) -> Result<CapacityReport> {
+    crate::safety::ensure_safe_for_tool(index)?;
     let size = crate::props::inspect_properties(index)?.size_bytes;
+    if !capacity_offsets_are_distinct(size) {
+        return Err(Error::Internal(
+            "media is too small for a meaningful capacity test".into(),
+        ));
+    }
     let mut tested = Vec::new();
     let mut first_failure = None;
 
-    if size == 0 {
-        return Ok(CapacityReport {
-            genuine: false,
-            first_failure: None,
-            tested_offsets: Vec::new(),
-        });
-    }
-
     // Test at 25%, 50%, 75%, and near the end.
-    let fractions: [f64; 4] = [0.25, 0.5, 0.75, 0.95];
+    let offsets = capacity_offsets(size);
     let path = format!(r"\\.\PhysicalDrive{}", index);
     let path_w: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
     let h = unsafe {
@@ -250,9 +298,9 @@ pub fn verify_capacity(index: u32, log: &crate::SharedLog) -> Result<CapacityRep
         return Err(crate::error::last_error());
     }
 
-    for (i, frac) in fractions.iter().enumerate() {
-        let offset = ((size as f64 * frac) / 512.0).floor() as i64 * 512;
-        let marker: u64 = 0x5344_5443_4100_0000u64 + i as u64; // "SDTCA" + index
+    for (i, &offset) in offsets.iter().enumerate() {
+        let offset = offset as i64;
+        let marker = capacity_marker(i);
         let data = marker.to_le_bytes();
         let mut pos: i64 = 0;
         let ok = unsafe { SetFilePointerEx(h, offset, &mut pos, 0) };
@@ -318,7 +366,13 @@ pub fn verify_capacity(index: u32, log: &crate::SharedLog) -> Result<CapacityRep
 /// Zero the entire card (SD Association formatter style). Much slower than a
 /// quick format but fixes cards that quick formatting cannot.
 pub fn full_overwrite(index: u32, log: &crate::SharedLog) -> Result<()> {
+    crate::safety::ensure_safe_for_tool(index)?;
     let size = crate::props::inspect_properties(index)?.size_bytes;
+    if size == 0 {
+        return Err(Error::Internal(
+            "disk size is unknown or zero; refusing to overwrite".into(),
+        ));
+    }
     let path = format!(r"\\.\PhysicalDrive{}", index);
     let path_w: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
     let h = unsafe {
@@ -349,6 +403,12 @@ pub fn full_overwrite(index: u32, log: &crate::SharedLog) -> Result<()> {
             unsafe { CloseHandle(h) };
             return Err(e);
         }
+        if written == 0 {
+            // A successful WriteFile that reports no bytes would otherwise loop
+            // forever on the same offset.
+            unsafe { CloseHandle(h) };
+            return Err(Error::Internal("full overwrite made no progress".into()));
+        }
         remaining -= written as u64;
         if let Some(pct) = (size - remaining)
             .checked_mul(100)
@@ -371,4 +431,53 @@ pub fn full_overwrite(index: u32, log: &crate::SharedLog) -> Result<()> {
         l.success("Full overwrite complete.");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capacity_offsets_are_distinct_and_in_bounds() {
+        let size = 32u64 * 1024 * 1024 * 1024; // 32 GiB
+        let offsets = capacity_offsets(size);
+        assert_eq!(offsets.len(), 4);
+        let mut sorted = offsets.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 4, "offsets must be distinct: {offsets:?}");
+        for off in &offsets {
+            assert!(*off < size, "offset {off} is out of bounds");
+            assert!(off % 512 == 0, "offset {off} is not sector aligned");
+        }
+        let first = offsets[0] as f64 / size as f64;
+        assert!((first - 0.25).abs() < 0.01, "first offset is {first}");
+    }
+
+    #[test]
+    fn capacity_offsets_are_empty_for_zero_size() {
+        assert!(capacity_offsets(0).is_empty());
+    }
+
+    #[test]
+    fn capacity_offsets_are_distinct_for_real_media() {
+        assert!(capacity_offsets_are_distinct(32 * 1024 * 1024 * 1024));
+    }
+
+    #[test]
+    fn capacity_offsets_are_not_distinct_for_tiny_media() {
+        // Every fraction floors to the same sector, so the test would be
+        // vacuous (and would falsely report counterfeit).
+        assert!(!capacity_offsets_are_distinct(0));
+        assert!(!capacity_offsets_are_distinct(1024));
+    }
+
+    #[test]
+    fn capacity_markers_are_distinct() {
+        let markers: Vec<u64> = (0..4).map(capacity_marker).collect();
+        let mut sorted = markers.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 4, "markers must be distinct: {markers:?}");
+    }
 }

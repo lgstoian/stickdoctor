@@ -2,6 +2,9 @@
 //! is available. Resolves `rc.exe` from PATH first, then from the Windows SDK
 //! (including the versioned x64 directory), so a plain `cargo build` on a
 //! machine with Visual Studio Build Tools works without `vcvars`.
+//!
+//! @sd file module="crates/stickdoctor-app/build.rs" role="build script for resource embedding" entry="main" exit="main"
+//! @sd anchor name=app.build text="build script"
 
 use std::env;
 use std::path::{Path, PathBuf};

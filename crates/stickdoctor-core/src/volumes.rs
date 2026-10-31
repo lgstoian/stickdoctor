@@ -1,3 +1,9 @@
+//! Volume <-> disk mapping, lock/dismount, drive letters and wait-for-volume.
+//!
+//! @sd file module="crates/stickdoctor-core/src/volumes.rs" role="volume mapping and unmount" entry="disk_volumes" exit="lock_dismount_all"
+//! @sd anchor name=core.volumes text="volumes"
+//! @sd ref name=core.repair
+
 use crate::error::Result;
 use crate::win32_const::{
     FSCTL_DISMOUNT_VOLUME, FSCTL_LOCK_VOLUME, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,

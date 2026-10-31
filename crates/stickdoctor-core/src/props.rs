@@ -1,4 +1,11 @@
-use crate::error::{last_error, Result};
+//! Bus type, size, model, serial, writable flag and media classification.
+//!
+//! @sd file module="crates/stickdoctor-core/src/props.rs" role="disk properties and media classification" entry="inspect_properties" exit="inspect_properties"
+//! @sd anchor name=core.props text="properties"
+//! @sd ref name=core.safety
+
+use crate::error::{last_error, Error, Result};
+use crate::win32_const::{ERROR_INSUFFICIENT_BUFFER, ERROR_MORE_DATA};
 use std::mem;
 use std::ptr;
 use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE};
@@ -7,7 +14,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::Ioctl::{
     IOCTL_DISK_GET_LENGTH_INFO, IOCTL_DISK_IS_WRITABLE, IOCTL_STORAGE_GET_DEVICE_NUMBER,
-    IOCTL_STORAGE_QUERY_PROPERTY,
+    IOCTL_STORAGE_QUERY_PROPERTY, STORAGE_DEVICE_NUMBER,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 
@@ -84,13 +91,6 @@ struct StorageDeviceDescriptor {
 #[derive(Default)]
 struct DiskLengthInfo {
     length: i64,
-}
-
-#[repr(C)]
-#[derive(Default)]
-struct StorageDeviceNumber {
-    device_number: u32,
-    partition_number: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -235,18 +235,41 @@ pub fn inspect_properties(index: u32) -> Result<DiskProperties> {
     };
     let mut buf = vec![0u8; 1024];
     let mut returned: u32 = 0;
-    let ok = unsafe {
+    let query_ptr = &query as *const _ as *const std::ffi::c_void;
+    let query_len = mem::size_of::<StoragePropertyQuery>() as u32;
+    let mut ok = unsafe {
         DeviceIoControl(
             h,
             IOCTL_STORAGE_QUERY_PROPERTY,
-            &query as *const _ as *const std::ffi::c_void,
-            mem::size_of::<StoragePropertyQuery>() as u32,
+            query_ptr,
+            query_len,
             buf.as_mut_ptr() as *mut std::ffi::c_void,
             buf.len() as u32,
             &mut returned,
             ptr::null_mut(),
         )
     };
+    // Some bridges return a descriptor larger than 1 KiB; retry with a bigger
+    // buffer instead of silently falling back to "unknown".
+    if ok == 0 {
+        if let Error::Win32(code, _) = last_error() {
+            if code == ERROR_INSUFFICIENT_BUFFER || code == ERROR_MORE_DATA {
+                buf = vec![0u8; 64 * 1024];
+                ok = unsafe {
+                    DeviceIoControl(
+                        h,
+                        IOCTL_STORAGE_QUERY_PROPERTY,
+                        query_ptr,
+                        query_len,
+                        buf.as_mut_ptr() as *mut std::ffi::c_void,
+                        buf.len() as u32,
+                        &mut returned,
+                        ptr::null_mut(),
+                    )
+                };
+            }
+        }
+    }
 
     let (bus, removable, model, serial) =
         if ok != 0 && returned as usize >= mem::size_of::<StorageDeviceDescriptor>() {
@@ -320,7 +343,9 @@ fn query_length(h: HANDLE) -> Option<u64> {
 }
 
 fn query_device_number(h: HANDLE) -> Option<u32> {
-    let mut d = StorageDeviceNumber::default();
+    // STORAGE_DEVICE_NUMBER is { DWORD DeviceType; DWORD DeviceNumber;
+    // DWORD PartitionNumber; } — 12 bytes, with DeviceNumber at offset 4.
+    let mut d: STORAGE_DEVICE_NUMBER = unsafe { std::mem::zeroed() };
     let mut returned: u32 = 0;
     let ok = unsafe {
         DeviceIoControl(
@@ -329,13 +354,13 @@ fn query_device_number(h: HANDLE) -> Option<u32> {
             ptr::null_mut(),
             0,
             &mut d as *mut _ as *mut _,
-            mem::size_of::<StorageDeviceNumber>() as u32,
+            mem::size_of::<STORAGE_DEVICE_NUMBER>() as u32,
             &mut returned,
             ptr::null_mut(),
         )
     };
-    if ok != 0 && returned >= mem::size_of::<StorageDeviceNumber>() as u32 {
-        Some(d.device_number)
+    if ok != 0 && returned >= mem::size_of::<STORAGE_DEVICE_NUMBER>() as u32 {
+        Some(d.DeviceNumber)
     } else {
         None
     }
@@ -399,7 +424,8 @@ mod ffi_layout {
         assert_eq!(size_of::<StoragePropertyQuery>(), 12);
         assert_eq!(size_of::<StorageDeviceDescriptor>(), 36);
         assert_eq!(size_of::<DiskLengthInfo>(), 8);
-        assert_eq!(size_of::<StorageDeviceNumber>(), 8);
+        // { DWORD DeviceType; DWORD DeviceNumber; DWORD PartitionNumber; }.
+        assert_eq!(size_of::<STORAGE_DEVICE_NUMBER>(), 12);
     }
 
     #[test]

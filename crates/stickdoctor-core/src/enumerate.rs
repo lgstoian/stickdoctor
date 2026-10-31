@@ -1,7 +1,13 @@
+//! Probe \\.\PhysicalDrive0..63 for openable physical drives.
+//!
+//! @sd file module="crates/stickdoctor-core/src/enumerate.rs" role="physical drive enumeration" entry="enumerate_disks" exit="enumerate_disks"
+//! @sd anchor name=core.enumerate text="enumeration"
+//! @sd ref name=core.lib
+
 use crate::error::Result;
 use std::ffi::OsString;
 use std::ptr;
-use windows_sys::Win32::Foundation::{GENERIC_READ, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
 };
@@ -44,25 +50,4 @@ pub fn enumerate_disks() -> Result<Vec<DiskDevice>> {
     }
 
     Ok(devices)
-}
-
-#[allow(dead_code)]
-pub fn open_physical_drive(index: u32) -> Result<HANDLE> {
-    let path = format!(r"\\.\PhysicalDrive{index}");
-    let path_w: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
-    let h = unsafe {
-        CreateFileW(
-            path_w.as_ptr(),
-            GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            ptr::null(),
-            OPEN_EXISTING,
-            0,
-            ptr::null_mut(),
-        )
-    };
-    if h == INVALID_HANDLE_VALUE {
-        return Err(crate::error::last_error());
-    }
-    Ok(h)
 }

@@ -1,3 +1,9 @@
+//! StickDoctor command line front end.
+//!
+//! @sd file module="crates/stickdoctor-cli/src/main.rs" role="CLI front end" entry="main" exit="cmd_repair"
+//! @sd anchor name=cli.main text="CLI"
+//! @sd ref name=core.lib
+
 use std::process::ExitCode;
 use stickdoctor_core::{
     enumerate_disks, execute_repair, inspect_properties, new_logger, DiskCandidate, FsChoice,
@@ -16,6 +22,7 @@ fn main() -> ExitCode {
         Some("clear-readonly") => cmd_clear_ro(&args[1..]),
         Some("chkdsk") => cmd_chkdsk(&args[1..]),
         Some("capacity") => cmd_capacity(&args[1..]),
+        Some("agent-map") => cmd_agent_map(&args[1..]),
         Some("repair") => cmd_repair(&args[1..]),
         Some("--version") | Some("-V") => {
             println!("stickdoctor {}", VERSION);
@@ -115,6 +122,14 @@ fn cmd_chkdsk(args: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Never repair the filesystem that Windows is running from: `chkdsk /f` on
+    // it requires a reboot and can disrupt the boot volume.
+    if let Some(system) = stickdoctor_core::system_drive_letter() {
+        if letter.eq_ignore_ascii_case(system.trim_end_matches(':')) {
+            eprintln!("Refusing chkdsk on the Windows system drive ({}).", system);
+            return ExitCode::FAILURE;
+        }
+    }
     match stickdoctor_core::run_chkdsk(&letter) {
         Ok(out) => {
             print!("{}", out);
@@ -163,6 +178,49 @@ fn cmd_capacity(args: &[String]) -> ExitCode {
     }
 }
 
+fn cmd_agent_map(args: &[String]) -> ExitCode {
+    let json = args.iter().any(|a| a == "--json");
+    let write = args.iter().any(|a| a == "--write");
+
+    let map = match stickdoctor_agent::scan_workspace() {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("Cannot scan the workspace: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let errors = stickdoctor_agent::validate(&map);
+    if !errors.is_empty() {
+        eprintln!("Annotation errors ({}):", errors.len());
+        for e in &errors {
+            eprintln!("  {e}");
+        }
+        return ExitCode::FAILURE;
+    }
+
+    let output = if json {
+        stickdoctor_agent::render_json(&map)
+    } else {
+        stickdoctor_agent::render_markdown(&map)
+    };
+
+    if write {
+        let path = stickdoctor_agent::workspace_root()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("docs/AGENT_MAP.md");
+        if let Err(e) = std::fs::write(&path, &output) {
+            eprintln!("Cannot write {}: {e}", path.display());
+            return ExitCode::FAILURE;
+        }
+        println!("Wrote {}", path.display());
+        return ExitCode::SUCCESS;
+    }
+
+    print!("{output}");
+    ExitCode::SUCCESS
+}
+
 fn positional_index(args: &[String]) -> Option<u32> {
     args.iter()
         .find(|a| !a.starts_with("--"))
@@ -174,6 +232,7 @@ fn print_help() {
         "stickdoctor {}\n\n\
          Usage:\n  \
          stickdoctor-cli [list] [--json]      List physical disks\n  \
+         stickdoctor-cli agent-map [--json]   Agent breadcrumbs (machine-readable)\n  \
          stickdoctor-cli repair <N> [fs] [label] [options]\n\n\
          Arguments:\n  \
          <N>       Physical drive number (see `list`)\n  \
@@ -327,6 +386,15 @@ fn cmd_repair(args: &[String]) -> ExitCode {
         }
     };
 
+    // Refuse before the confirmation: the repair engine gates again, but the
+    // user should not be asked to confirm an operation that cannot run.
+    let safety = stickdoctor_core::safety_check(&props, index)
+        .unwrap_or(stickdoctor_core::SafetyStatus::Unknown);
+    if !matches!(safety, stickdoctor_core::SafetyStatus::Safe) {
+        eprintln!("Refusing: {}", safety.long_label());
+        return ExitCode::FAILURE;
+    }
+
     println!("Disk:    PhysicalDrive{}", index);
     println!(
         "Model:   {}",
@@ -393,8 +461,31 @@ fn cmd_repair(args: &[String]) -> ExitCode {
 
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max.saturating_sub(3)])
+        return s.to_string();
+    }
+    // Char-based so a multi-byte model name cannot split a code point.
+    let mut out: String = s.chars().take(max.saturating_sub(3)).collect();
+    out.push_str("...");
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    #[test]
+    fn truncate_keeps_short_strings() {
+        assert_eq!(truncate("abc", 5), "abc");
+    }
+
+    #[test]
+    fn truncate_shortens_long_strings() {
+        assert_eq!(truncate("abcdefghij", 8), "abcde...");
+    }
+
+    #[test]
+    fn truncate_handles_multibyte_model_names() {
+        // A multi-byte name must not split a code point (the old code panicked).
+        assert_eq!(truncate("µµµµµµµµµµµµ", 8), "µµµµµ...");
     }
 }

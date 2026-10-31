@@ -1,3 +1,8 @@
+//! Constants not exposed (or not consistently exposed) by windows-sys.
+//!
+//! @sd file module="crates/stickdoctor-core/src/win32_const.rs" role="Win32 IOCTL and FSCTL constants" entry="FSCTL_LOCK_VOLUME" exit="PROPERTY_STANDARD_QUERY"
+//! @sd anchor name=core.win32_const text="Win32 constants"
+
 #![allow(dead_code)]
 // Constants not exposed (or not consistently exposed) by windows-sys.
 
@@ -13,6 +18,7 @@ pub const IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS: u32 = 0x00056000;
 // ---- Win32 error codes ----
 pub const ERROR_WRITE_PROTECT: u32 = 19;
 pub const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+pub const ERROR_MORE_DATA: u32 = 234;
 pub const ERROR_NO_MORE_ITEMS: u32 = 259;
 
 // ---- STORAGE_PROPERTY query IDs ----

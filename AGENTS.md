@@ -41,7 +41,32 @@ crates/
     assets/                 icon, manifest, .rc
     build.rs                embeds resources when rc.exe / windres exist
 docs/                       architecture, security, safety, troubleshooting
+                            + AGENT_ANNOTATIONS.md and AGENT_MAP.md
 .github/                    CI + release workflows, issue templates
+```
+
+## Agent annotations (`@sd`) — read this before editing
+
+Every source file carries machine-readable `@sd` breadcrumbs (module role, entry
+and exit points, pipeline stages, invariants, verification guards, hazards).
+`stickdoctor-agent` parses them and `cargo test` validates them. See
+[`docs/AGENT_ANNOTATIONS.md`](docs/AGENT_ANNOTATIONS.md) for the schema.
+
+The guard fails the build when:
+
+- an annotation is malformed or a `file` breadcrumb is missing,
+- an `invariant` or `verify` entry has no matching test,
+- a `flow` pipeline is out of order or has a dangling `next`,
+- a `#[test]` function contains no assertion, or is `#[ignore]`d,
+- a function named by `@sd verify` can return success for an unknown input
+  (`=> true`),
+- the committed `docs/AGENT_MAP.md` no longer matches the code.
+
+After editing annotations run:
+
+```powershell
+cargo test -p stickdoctor-agent --test guard
+cargo run -p stickdoctor-cli -- agent-map --write   # refresh docs/AGENT_MAP.md
 ```
 
 ## Build & test
@@ -113,12 +138,17 @@ the boot sector proves the format landed.
 
 ## Safety invariants — do not break these
 
-1. **Never touch the Windows system disk.** `safety.rs` compares
-   `IOCTL_STORAGE_GET_DEVICE_NUMBER` for the candidate against the disk that
-   holds `%SystemRoot%`. The check runs **twice** — in the UI and again inside
-   the repair engine.
+1. **Never touch the Windows system disk.** `safety.rs` compares the
+   `STORAGE_DEVICE_NUMBER` (the `windows-sys` type — `DeviceNumber` is at offset
+   4, after `DeviceType`) of the candidate against the disk that holds
+   `%SystemRoot%`. The check runs **twice** — in the UI and again inside the
+   repair engine — and **fails closed**: if either number cannot be read, the
+   operation is refused rather than assumed safe.
 2. **Only removable media.** `safety_check` refuses anything that is not USB /
-   removable unless it is explicitly removable media.
+   removable unless it is explicitly removable media. The same gate
+   (`ensure_safe_for_tool`) protects every disk-modifying tool — full overwrite,
+   capacity test, clear-readonly and `chkdsk` — in the GUI and CLI, not just
+   `execute_repair`.
 3. **Always require elevation.** The app self-elevates; the manifest also says
    `requireAdministrator` when embedded.
 4. **Success requires independent verification.** Never report success from a

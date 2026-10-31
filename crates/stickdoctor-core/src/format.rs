@@ -1,3 +1,13 @@
+//! Formatting (fmifs / diskpart / format.com) and independent verification.
+//!
+//! @sd file module="crates/stickdoctor-core/src/format.rs" role="format and verification" entry="format_volume" exit="verify_boot_sector"
+//! @sd anchor name=core.format text="format and verification"
+//! @sd ref name=core.repair
+//! @sd verify id=boot-sector-signature fn="boot_sector_matches" proves="the partition boot sector holds the requested filesystem signature" negative_test=boot_sector_rejects_unknown_fs_name
+//! @sd flow id=format.fmifs step=1 pipeline=format label="fmifs FormatEx" next=format.diskpart
+//! @sd flow id=format.diskpart step=2 pipeline=format label="diskpart format" next=format.formatcom
+//! @sd flow id=format.formatcom step=3 pipeline=format label="format.com"
+
 use crate::error::{Error, Result};
 use crate::log::LogLevel;
 use crate::repair::FsChoice;
@@ -24,7 +34,7 @@ use windows_sys::Win32::System::IO::DeviceIoControl;
 
 /// Absolute path to a system tool, so the Windows search order cannot be
 /// hijacked by a binary planted in the current directory or on PATH.
-fn system32(name: &str) -> PathBuf {
+pub(crate) fn system32(name: &str) -> PathBuf {
     let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
     PathBuf::from(root).join("System32").join(name)
 }
@@ -243,31 +253,43 @@ type FormatExFn = unsafe extern "system" fn(
 
 unsafe extern "system" fn format_callback(
     action: u32,
-    _sub: u32,
+    packet_length: u32,
     data: *mut std::ffi::c_void,
 ) -> i32 {
-    // action 1 = OutputMsg (wide string), action 2 = PercentDone (data is a DWORD*)
-    if action == 2 && !data.is_null() {
-        let pct = unsafe { *(data as *const u32) } as u8;
-        FORMAT_PROGRESS.store(pct.min(100), Ordering::Relaxed);
+    if data.is_null() {
+        return 1;
     }
-    if action == 1 && !data.is_null() {
-        let p = data as *const u16;
-        let mut len = 0usize;
-        while unsafe { *p.add(len) } != 0 && len < 512 {
-            len += 1;
+    // fmifs reports PROGRESS (0) with a DWORD percent and OUTPUT (14) with a
+    // wide string (the CALLBACKCOMMAND enum in fmifs.h). Some documentation
+    // describes 1 = OutputMsg / 2 = PercentDone; handle both so progress and
+    // messages are not silently lost on either convention.
+    match action {
+        0 | 2 => {
+            let pct = unsafe { *(data as *const u32) } as u8;
+            FORMAT_PROGRESS.store(pct.min(100), Ordering::Relaxed);
         }
-        let msg = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(p, len) });
-        let msg = msg.trim().to_string();
-        if !msg.is_empty() {
-            FORMAT_LOG.with(|l| {
-                if let Some(log) = l.borrow().as_ref() {
-                    if let Ok(mut g) = log.lock() {
-                        g.info(format!("  fmifs: {}", msg));
+        1 | 14 => {
+            // Bound the wide-string read by the packet length, never by a fixed
+            // 512-unit guess, so a non-string packet cannot be over-read.
+            let max_chars = (packet_length as usize / 2).clamp(1, 512);
+            let p = data as *const u16;
+            let mut len = 0usize;
+            while len < max_chars && unsafe { *p.add(len) } != 0 {
+                len += 1;
+            }
+            let msg = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(p, len) });
+            let msg = msg.trim().to_string();
+            if !msg.is_empty() {
+                FORMAT_LOG.with(|l| {
+                    if let Some(log) = l.borrow().as_ref() {
+                        if let Ok(mut g) = log.lock() {
+                            g.info(format!("  fmifs: {}", msg));
+                        }
                     }
-                }
-            });
+                });
+            }
         }
+        _ => {}
     }
     1 // continue
 }
@@ -418,21 +440,42 @@ fn format_with_diskpart(volume: &VolumeInfo, fs: FsChoice, label: &str, quick: b
             ))
         }
     };
-    let quick = if quick { "quick" } else { "" };
-    let script = format!(
-        "select volume {}\nformat fs={} label={} {}\n",
-        target,
-        fs.fmifs_name(),
-        label,
-        quick
-    );
+    let script = if quick {
+        format!(
+            "select volume {}\nformat fs={} label={} quick\n",
+            target,
+            fs.fmifs_name(),
+            label
+        )
+    } else {
+        format!(
+            "select volume {}\nformat fs={} label={}\n",
+            target,
+            fs.fmifs_name(),
+            label
+        )
+    };
     run_diskpart(&script).map(|_| ())
 }
 
 // ------------------------------------------------------------ format.com
 
+/// The `format.com` drive argument for a volume root.
+///
+/// `format.com` needs a drive letter; a volume that only has a GUID path has
+/// none, so refuse rather than build a nonsense argument such as `\:`.
+fn format_com_drive(root: &str) -> Result<String> {
+    if root.len() >= 2 && root.as_bytes()[1] == b':' {
+        Ok(root[..2].to_string())
+    } else {
+        Err(Error::Internal(
+            "format.com requires a drive letter; the volume has none".into(),
+        ))
+    }
+}
+
 fn format_with_format_com(root: &str, fs: FsChoice, label: &str, quick: bool) -> Result<()> {
-    let drive = format!("{}:", root.chars().next().unwrap_or('E'));
+    let drive = format_com_drive(root)?;
     let fs_arg = match fs {
         FsChoice::Fat32 => "FAT32",
         FsChoice::ExFat => "exFAT",
@@ -469,14 +512,24 @@ pub fn run_diskpart(script: &str) -> Result<String> {
         .spawn()
         .map_err(Error::Io)?;
 
-    {
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| Error::Internal("cannot open diskpart stdin".into()))?;
-        stdin.write_all(script.as_bytes()).map_err(Error::Io)?;
-        // Dropping `stdin` here closes the pipe and signals EOF.
+    // Write the script and close the pipe (EOF). If that fails, make sure the
+    // child does not linger as a detached diskpart.
+    let mut stdin = match child.stdin.take() {
+        Some(s) => s,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::Internal("cannot open diskpart stdin".into()));
+        }
+    };
+    if let Err(e) = stdin.write_all(script.as_bytes()) {
+        drop(stdin);
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(Error::Io(e));
     }
+    // Dropping `stdin` here closes the pipe and signals EOF.
+    drop(stdin);
 
     let out = child.wait_with_output().map_err(Error::Io)?;
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -493,6 +546,20 @@ pub fn run_diskpart(script: &str) -> Result<String> {
         )));
     }
     Ok(combined)
+}
+
+/// Pure partition boot-sector signature check.
+///
+/// An unrecognised filesystem name returns `false`: verification must never
+/// pass on an input it does not understand. This is the false-green guard for
+/// the success decision in `repair`.
+pub(crate) fn boot_sector_matches(buf: &[u8], expected_fs: &str) -> bool {
+    match expected_fs {
+        "FAT32" => buf.len() >= 90 && &buf[82..90] == b"FAT32   ",
+        "exFAT" => buf.len() >= 11 && &buf[3..11] == b"EXFAT   ",
+        "NTFS" => buf.len() >= 11 && &buf[3..11] == b"NTFS    ",
+        _ => false,
+    }
 }
 
 /// Read the partition's boot sector and check the filesystem signature.
@@ -532,12 +599,7 @@ pub fn verify_boot_sector(index: u32, expected_fs: &str, log: &SharedLog) -> Res
             "cannot read the partition boot sector".into(),
         ));
     }
-    let sig_ok = match expected_fs {
-        "FAT32" => &buf[82..90] == b"FAT32   ",
-        "exFAT" => &buf[3..11] == b"EXFAT   ",
-        "NTFS" => &buf[3..11] == b"NTFS    ",
-        _ => true,
-    };
+    let sig_ok = boot_sector_matches(&buf, expected_fs);
     if !sig_ok {
         return Err(Error::Internal(format!(
             "boot sector does not contain a {} signature (format did not take effect)",
@@ -568,4 +630,60 @@ fn encode_wide(s: &str) -> Vec<u16> {
 pub fn verify_disk(index: u32) -> Result<Option<VolumeInfo>> {
     let vols = crate::volumes::disk_volumes(index)?;
     Ok(vols.into_iter().find(|v| v.filesystem.is_some()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sector(sig_at: usize, sig: &[u8]) -> Vec<u8> {
+        let mut b = vec![0u8; 512];
+        b[sig_at..sig_at + sig.len()].copy_from_slice(sig);
+        b
+    }
+
+    #[test]
+    fn boot_sector_matches_expected_signatures() {
+        assert!(boot_sector_matches(&sector(82, b"FAT32   "), "FAT32"));
+        assert!(boot_sector_matches(&sector(3, b"EXFAT   "), "exFAT"));
+        assert!(boot_sector_matches(&sector(3, b"NTFS    "), "NTFS"));
+    }
+
+    #[test]
+    fn boot_sector_rejects_wrong_signature() {
+        // The false-green guard: the wrong signature must not verify.
+        assert!(!boot_sector_matches(&sector(82, b"FAT32   "), "NTFS"));
+        assert!(!boot_sector_matches(&sector(3, b"NTFS    "), "FAT32"));
+        assert!(!boot_sector_matches(&sector(3, b"EXFAT   "), "FAT32"));
+    }
+
+    #[test]
+    fn boot_sector_rejects_unknown_fs_name() {
+        // An unknown name must fail rather than assume success.
+        assert!(!boot_sector_matches(&sector(82, b"FAT32   "), "ReFS"));
+        assert!(!boot_sector_matches(&sector(3, b"NTFS    "), ""));
+    }
+
+    #[test]
+    fn boot_sector_rejects_truncated_buffer() {
+        assert!(!boot_sector_matches(&[], "FAT32"));
+        assert!(!boot_sector_matches(&[0u8; 10], "exFAT"));
+    }
+
+    #[test]
+    fn system32_resolves_an_absolute_path() {
+        let path = system32("diskpart.exe");
+        let s = path.to_string_lossy().to_lowercase();
+        assert!(s.contains("system32"), "{s}");
+        assert!(s.ends_with("diskpart.exe"), "{s}");
+        assert!(!s.contains(".."), "{s}");
+    }
+
+    #[test]
+    fn format_com_drive_requires_a_drive_letter() {
+        assert_eq!(format_com_drive("E:\\").unwrap(), "E:");
+        assert_eq!(format_com_drive("e:\\").unwrap(), "e:");
+        // A volume with only a GUID path has no letter.
+        assert!(format_com_drive(r"\\?\Volume{abc}\").is_err());
+    }
 }
