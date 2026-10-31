@@ -168,11 +168,11 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "stickdoctor-agent"
-version = "0.2.2"
+version = "0.3.0"
 
 [[package]]
 name = "stickdoctor-app"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "native-windows-gui",
  "serde",
@@ -183,7 +183,7 @@ dependencies = [
 
 [[package]]
 name = "stickdoctor-cli"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "serde_json",
  "stickdoctor-agent",
@@ -193,7 +193,7 @@ dependencies = [
 
 [[package]]
 name = "stickdoctor-core"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "encoding_rs",
  "thiserror",

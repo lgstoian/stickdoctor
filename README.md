@@ -5,7 +5,7 @@
 
 ![CI](https://github.com/lgstoian/stickdoctor/actions/workflows/ci.yml/badge.svg)
 ![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)
-![Version](https://img.shields.io/badge/version-0.2.2-blue)
+![Version](https://img.shields.io/badge/version-0.3.0-blue)
 
 ---
 
@@ -174,7 +174,22 @@ cargo deny check
 crates/stickdoctor-core   disk logic, no UI
 crates/stickdoctor-cli    command line front end
 crates/stickdoctor-app    native Win32 GUI (native-windows-gui)
+crates/stickdoctor-agent  @sd breadcrumb parser + false-green guard
 docs/                     architecture, security, safety, troubleshooting
+```
+
+## Working on this code as an agent
+
+Every source file carries machine-readable `@sd` breadcrumbs, and
+`docs/AGENT_MAP.md` is a generated map of the codebase. `cargo test --all`
+validates them, so a stale breadcrumb, a missing guard test, a vacuous test or a
+verification that can succeed on an unknown input fails the build. The schema and
+the rules are in [docs/AGENT_ANNOTATIONS.md](docs/AGENT_ANNOTATIONS.md); the
+quick version is:
+
+```powershell
+cargo run -p stickdoctor-cli -- agent-map --json   # machine-readable map
+cargo test -p stickdoctor-agent --test guard       # the guard
 ```
 
 ## Why not just use Rufus?
