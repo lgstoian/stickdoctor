@@ -27,8 +27,12 @@ fn committed_map_is_up_to_date() {
     let path = workspace_root()
         .expect("workspace root")
         .join("docs/AGENT_MAP.md");
+    // Git may check the file out with CRLF on Windows. The generated map always
+    // uses LF, so normalize before comparing; otherwise CI fails on a file that
+    // is byte-identical apart from line endings.
     let committed = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+        .replace("\r\n", "\n");
     assert_eq!(
         committed.trim(),
         rendered.trim(),

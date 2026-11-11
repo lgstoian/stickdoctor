@@ -1,0 +1,3 @@
+# The agent map is generated with LF and compared after newline normalization.
+# Keep the checkout LF so Windows and Linux produce the same bytes.
+docs/AGENT_MAP.md text eol=lf
