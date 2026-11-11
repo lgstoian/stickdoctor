@@ -15,7 +15,8 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    CreateFileW, DeleteVolumeMountPointW, SetVolumeMountPointW, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    OPEN_EXISTING,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 
@@ -113,7 +114,11 @@ pub fn wait_for_volume(target_disk_index: u32, attempts: u32) -> Option<VolumeIn
     None
 }
 
-pub fn first_drive_letter(volume_name: &str) -> Option<String> {
+/// Every mount point of a volume (for example `D:\`, `H:\`, or a folder path).
+///
+/// `GetVolumePathNamesForVolumeNameW` returns a `MULTI_SZ`; the trailing
+/// backslash is part of each mount point and must be kept.
+pub fn volume_mount_points(volume_name: &str) -> Vec<String> {
     use windows_sys::Win32::Storage::FileSystem::GetVolumePathNamesForVolumeNameW;
     let wide: Vec<u16> = volume_name
         .encode_utf16()
@@ -122,27 +127,43 @@ pub fn first_drive_letter(volume_name: &str) -> Option<String> {
     let mut len: u32 = 0;
     unsafe { GetVolumePathNamesForVolumeNameW(wide.as_ptr(), ptr::null_mut(), 0, &mut len) };
     if len == 0 {
-        return None;
+        return Vec::new();
     }
     let mut paths = vec![0u16; len as usize];
     let ok = unsafe {
         GetVolumePathNamesForVolumeNameW(wide.as_ptr(), paths.as_mut_ptr(), len, &mut len)
     };
     if ok == 0 {
-        return None;
+        return Vec::new();
     }
-    let s = OsString::from_wide(&paths[..len as usize])
+    OsString::from_wide(&paths[..len as usize])
         .to_string_lossy()
         .split('\0')
-        .next()
-        .unwrap_or("")
-        .trim_end_matches('\\')
-        .to_string();
-    if s.len() == 2 && s.ends_with(':') {
-        Some(s)
-    } else {
-        None
-    }
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect()
+}
+
+pub fn first_drive_letter(volume_name: &str) -> Option<String> {
+    volume_mount_points(volume_name)
+        .into_iter()
+        .find_map(|path| {
+            let s = path.trim_end_matches('\\').to_string();
+            if s.len() == 2 && s.ends_with(':') {
+                Some(s)
+            } else {
+                None
+            }
+        })
+}
+
+/// `FindFirstVolumeW` returns `\\?\Volume{GUID}\` with a trailing backslash, but
+/// `CreateFileW` only opens a volume **without** it. Keeping the slash here made
+/// every volume lookup fail with `ERROR_PATH_NOT_FOUND`, so nothing was ever
+/// locked or dismounted. `GetVolumeInformationW` still needs the slash, so only
+/// the handle-opening call sites trim it.
+pub(crate) fn openable_volume_path(device_path: &str) -> &str {
+    device_path.trim_end_matches('\\')
 }
 
 /// Volumes that span the disk.
@@ -158,7 +179,7 @@ pub fn first_drive_letter(volume_name: &str) -> Option<String> {
 ///   offset 16: LARGE_INTEGER ExtentLength
 ///   sizeof   : 24
 fn volume_on_disk(volume_name: &str, disk_index: u32) -> bool {
-    let wide: Vec<u16> = volume_name
+    let wide: Vec<u16> = openable_volume_path(volume_name)
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
@@ -268,8 +289,7 @@ pub fn lock_dismount_all(target_disk_index: u32) -> Result<(usize, usize)> {
     let mut locked = 0;
     let mut dismounted = 0;
     for v in &volumes {
-        let wide: Vec<u16> = v
-            .device_path
+        let wide: Vec<u16> = openable_volume_path(&v.device_path)
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
@@ -333,6 +353,164 @@ pub fn lock_dismount_all(target_disk_index: u32) -> Result<(usize, usize)> {
     Ok((locked, dismounted))
 }
 
+/// Volume handles kept locked and dismounted for the lifetime of a raw-I/O
+/// operation.
+///
+/// A dismount alone is not enough: Windows still rejects writes to sectors that
+/// belong to a mounted volume with `ERROR_ACCESS_DENIED`. `FSCTL_LOCK_VOLUME`
+/// must stay held while the physical drive is written, so the handles live in
+/// this guard and are released on drop.
+#[derive(Default)]
+pub struct VolumeLocks {
+    handles: Vec<windows_sys::Win32::Foundation::HANDLE>,
+    dismounted: usize,
+}
+
+impl VolumeLocks {
+    /// Number of volumes that are locked.
+    pub fn locked(&self) -> usize {
+        self.handles.len()
+    }
+
+    /// Number of volumes that were also dismounted.
+    pub fn dismounted(&self) -> usize {
+        self.dismounted
+    }
+}
+
+impl Drop for VolumeLocks {
+    fn drop(&mut self) {
+        for h in &self.handles {
+            unsafe { CloseHandle(*h) };
+        }
+    }
+}
+
+/// Lock, dismount and **hold** every volume on a disk.
+pub fn lock_dismount_all_held(target_disk_index: u32) -> Result<VolumeLocks> {
+    let volumes = disk_volumes(target_disk_index)?;
+    let mut handles = Vec::new();
+    let mut dismounted = 0;
+    for v in &volumes {
+        let wide: Vec<u16> = openable_volume_path(&v.device_path)
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let h = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                ptr::null(),
+                OPEN_EXISTING,
+                0,
+                ptr::null_mut(),
+            )
+        };
+        if h == INVALID_HANDLE_VALUE {
+            continue;
+        }
+        let mut returned: u32 = 0;
+        let mut ok_lock = 0;
+        for _ in 0..10 {
+            ok_lock = unsafe {
+                DeviceIoControl(
+                    h,
+                    FSCTL_LOCK_VOLUME,
+                    ptr::null_mut(),
+                    0,
+                    ptr::null_mut(),
+                    0,
+                    &mut returned,
+                    ptr::null_mut(),
+                )
+            };
+            if ok_lock != 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+        if ok_lock == 0 {
+            unsafe { CloseHandle(h) };
+            continue;
+        }
+        let ok_dis = unsafe {
+            DeviceIoControl(
+                h,
+                FSCTL_DISMOUNT_VOLUME,
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                0,
+                &mut returned,
+                ptr::null_mut(),
+            )
+        };
+        if ok_dis != 0 {
+            dismounted += 1;
+        }
+        handles.push(h);
+    }
+    Ok(VolumeLocks {
+        handles,
+        dismounted,
+    })
+}
+
+/// Rebuild each volume's mount points so Windows mounts the filesystem again
+/// after a raw-I/O test. A dismount otherwise leaves the drive letter dead
+/// until a replug or an elevated `mountvol`.
+pub fn remount_volumes(target_disk_index: u32) -> usize {
+    let volumes = match disk_volumes(target_disk_index) {
+        Ok(v) => v,
+        Err(_) => return 0,
+    };
+    let mut remounted = 0;
+    for v in &volumes {
+        let points = volume_mount_points(&v.device_path);
+        if points.is_empty() {
+            // No drive letter or folder mount point: probing the volume is the
+            // best we can do; Windows will mount it on the next access.
+            if probe_filesystem(&v.device_path).is_some() {
+                remounted += 1;
+            }
+            continue;
+        }
+        let volume_w: Vec<u16> = v
+            .device_path
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        for point in &points {
+            let point_w: Vec<u16> = point.encode_utf16().chain(std::iter::once(0)).collect();
+            // SetVolumeMountPointW both recreates the mount point and mounts
+            // the filesystem. If the mount point still exists it fails with
+            // ERROR_ALREADY_EXISTS, so remove it and try again.
+            let mut ok = unsafe { SetVolumeMountPointW(point_w.as_ptr(), volume_w.as_ptr()) };
+            if ok == 0 {
+                unsafe { DeleteVolumeMountPointW(point_w.as_ptr()) };
+                for _ in 0..10 {
+                    ok = unsafe { SetVolumeMountPointW(point_w.as_ptr(), volume_w.as_ptr()) };
+                    if ok != 0 {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            }
+            if ok != 0 {
+                for _ in 0..10 {
+                    if probe_filesystem(&v.device_path).is_some() {
+                        remounted += 1;
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            }
+        }
+    }
+    remounted
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_extent_disks;
@@ -367,5 +545,18 @@ mod tests {
     fn ignores_truncated_buffers() {
         assert!(parse_extent_disks(&[]).is_empty());
         assert!(parse_extent_disks(&[1, 0, 0, 0]).is_empty());
+    }
+
+    #[test]
+    fn volume_device_paths_lose_the_trailing_backslash() {
+        // CreateFileW fails with ERROR_PATH_NOT_FOUND on the trailing slash.
+        assert_eq!(
+            super::openable_volume_path(r"\\?\Volume{34bd1a1a-42e4-11f1-9eeb-2c7ba08d4810}\"),
+            r"\\?\Volume{34bd1a1a-42e4-11f1-9eeb-2c7ba08d4810}"
+        );
+        assert_eq!(
+            super::openable_volume_path(r"\\?\Volume{34bd1a1a-42e4-11f1-9eeb-2c7ba08d4810}"),
+            r"\\?\Volume{34bd1a1a-42e4-11f1-9eeb-2c7ba08d4810}"
+        );
     }
 }

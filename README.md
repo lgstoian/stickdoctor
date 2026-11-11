@@ -5,7 +5,7 @@
 
 ![CI](https://github.com/lgstoian/stickdoctor/actions/workflows/ci.yml/badge.svg)
 ![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)
-![Version](https://img.shields.io/badge/version-0.3.0-blue)
+![Version](https://img.shields.io/badge/version-0.4.0-blue)
 
 ---
 
@@ -59,7 +59,7 @@ normal FAT32/exFAT/NTFS volume, and then **proves the result works**.
 | Scan for lost partitions | TestDisk-style search for orphaned boot sectors | Read-only |
 | Clear write protection | Clears disk + volume read-only attributes, reports registry policy | Non-destructive |
 | Repair filesystem | `chkdsk <drive>: /f` when a volume is mounted | Non-destructive |
-| Test capacity | Counterfeit / fake-capacity detection at 25/50/75/95 % | **Writes** |
+| Test capacity | Counterfeit / fake-capacity detection: quick sample across the whole card, or `--full` to write and verify every byte | **Writes** |
 | Full overwrite | Zero the entire card before formatting (SD Association style) | Destructive |
 
 ## Safety
@@ -113,8 +113,14 @@ StickDoctorCLI.exe verify 3                     # is it formatted?
 StickDoctorCLI.exe scan 3                       # look for lost partitions
 StickDoctorCLI.exe clear-readonly 3             # clear write protection
 StickDoctorCLI.exe chkdsk E                     # repair the filesystem
-StickDoctorCLI.exe capacity 3                   # counterfeit test (writes!)
+StickDoctorCLI.exe capacity 3                   # quick counterfeit test (writes!)
+StickDoctorCLI.exe capacity 3 --full            # exhaustive write + verify (slow)
 ```
+
+A genuine 128 GB card often reports about 116.5 GiB (125 GB) in Windows. That is
+normal: the advertised size is decimal, Windows shows binary units, and some
+controllers reserve a little space. The capacity test judges the card by reading
+back what it wrote, not by the number of GiB.
 
 ## Troubleshooting
 

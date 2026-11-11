@@ -165,6 +165,8 @@ the boot sector proves the format landed.
 | System tools resolved from `%SystemRoot%\System32` | Prevents binary planting via PATH / current directory. |
 | `fmifs.dll` loaded with `LOAD_LIBRARY_SEARCH_SYSTEM32` | Prevents DLL search-order hijacking. |
 | FFI struct sizes asserted in tests | `VOLUME_DISK_EXTENTS` and friends are ABI; a wrong layout corrupts memory. |
+| Capacity test writes all samples before reading any back | A fake that wraps addresses returns the last write at the same LBA; an immediate write/read-back can never detect it. Cache-bypassing reads (`FILE_FLAG_NO_BUFFERING`) and a flush are mandatory. |
+| Capacity I/O is sector-aligned and block-sized | `WriteFile` on `\\.\PhysicalDriveN` rejects anything smaller than a sector (`ERROR_INVALID_PARAMETER`). The old 8-byte probe marked every card counterfeit. |
 
 ## Tools beyond "repair and format"
 
@@ -175,7 +177,7 @@ the boot sector proves the format landed.
 | `scan_lost_partitions` | TestDisk-style search for orphaned boot sectors. |
 | `clear_read_only` | Disk **and** volume level, plus registry policy detection. |
 | `run_chkdsk` | Filesystem repair when a volume is mounted. |
-| `verify_capacity` | Counterfeit / fake-capacity test (writes at 25/50/75/95 %). |
+| `verify_capacity` | Counterfeit / fake-capacity test: quick-mode samples 128 aligned blocks across the whole card; `verify_capacity_full` writes and verifies every byte. |
 | `full_overwrite` | SD Association formatter style — zero the whole card. |
 | `verify_disk` | Non-destructive "is this formatted?" check. |
 
@@ -193,6 +195,13 @@ the boot sector proves the format landed.
 - **`VOLUME_DISK_EXTENTS`** layout on x64: `NumberOfDiskExtents` at offset 0,
   padding at 4, `Extents[0].DiskNumber` at offset **8**. Reading offset 0 was a
   real bug (`volumes::tests` guards it).
+- **`IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS` is `0x00560000`, not `0x00056000`.**
+  The wrong control code made `DeviceIoControl` return `ERROR_NOT_SUPPORTED`, so
+  `disk_volumes` always returned empty and nothing was ever unmounted.
+  `win32_const::tests` asserts the CTL_CODE values.
+- **Volume paths from `FindFirstVolumeW` end in `\`, and `CreateFileW` rejects
+  that trailing slash** (`ERROR_PATH_NOT_FOUND`). Trim it for handle opens
+  (`openable_volume_path`); `GetVolumeInformationW` still needs it.
 
 ## Testing notes
 
@@ -200,6 +209,10 @@ the boot sector proves the format landed.
   sanitisation, `FsChoice`, `safety_check`, and MBR generation.
 - `repair::tests::mbr_has_one_fat32_partition_at_1mib` is the regression test
   for the fallback layout writer.
+- `tools::tests::sample_offsets_are_aligned_distinct_and_in_bounds` and
+  `pattern_roundtrips_and_identifies_its_offset` guard the capacity test: offsets
+  must be 4 KiB-aligned, and a block must carry its own offset so a wrapped write
+  is detected.
 - There is no automated end-to-end test: it needs Administrator rights and a
   real stick. Manual matrix: a dd'd stick, a healthy stick, a >32 GiB stick
   (exFAT path), and a write-protected SD card.

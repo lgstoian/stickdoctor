@@ -36,9 +36,13 @@ pub use repair::{
 pub use safety::{ensure_safe_for_tool, safety_check, system_drive_letter, SafetyStatus};
 pub use tools::{
     clear_read_only, full_overwrite, run_chkdsk, scan_lost_partitions, verify_capacity,
-    CapacityReport, LostPartition,
+    verify_capacity_full, verify_capacity_with_mode, CapacityReport, CapacityTestMode,
+    CapacityVerdict, LostPartition, WrapEvidence,
 };
-pub use volumes::{disk_volumes, lock_dismount_all, wait_for_volume, VolumeInfo};
+pub use volumes::{
+    disk_volumes, lock_dismount_all, lock_dismount_all_held, remount_volumes, wait_for_volume,
+    VolumeInfo, VolumeLocks,
+};
 
 use std::sync::{Arc, Mutex};
 

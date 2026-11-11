@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use stickdoctor_core::{
     clear_read_only, enumerate_disks, execute_repair_with_progress, format_progress, new_logger,
-    run_chkdsk, scan_lost_partitions, verify_capacity, DiskCandidate, FsChoice, RepairOptions,
-    SharedLog,
+    run_chkdsk, scan_lost_partitions, verify_capacity_with_mode, CapacityTestMode, CapacityVerdict,
+    DiskCandidate, FsChoice, RepairOptions, SharedLog,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -590,28 +590,44 @@ fn build_ui() {
                         window_h.as_ref(),
                         &nwg::MessageParams {
                             title: "Capacity test writes data",
-                            content: "This writes test patterns to the media. Use it only on a card whose data you do not need.\n\nContinue?",
-                            buttons: nwg::MessageButtons::YesNo,
+                            content: "This writes test patterns to the media and destroys its contents.\n\nYES = full test: write and verify the whole card (can take an hour).\nNO = quick check: sample 128 points across the card (seconds).\n\nRun the FULL test?",
+                            buttons: nwg::MessageButtons::YesNoCancel,
                             icons: nwg::MessageIcons::Warning,
                         },
                     );
-                    if choice == nwg::MessageChoice::Yes {
-                        run_tool(st.clone(), sender, "capacity", true, |idx, log| {
-                            match verify_capacity(idx, log) {
-                                Ok(r) => {
-                                    if r.genuine {
-                                        log.lock().unwrap().success("Capacity test passed.");
-                                    } else {
-                                        log.lock().unwrap().error(format!(
-                                            "Counterfeit media: first failure at offset {}.",
-                                            r.first_failure.unwrap_or(0)
-                                        ));
-                                    }
+                    let mode = match choice {
+                        nwg::MessageChoice::Yes => CapacityTestMode::Full,
+                        nwg::MessageChoice::No => CapacityTestMode::Quick,
+                        _ => return,
+                    };
+                    run_tool(st.clone(), sender, "capacity", true, move |idx, log| {
+                        match verify_capacity_with_mode(idx, mode, log) {
+                            Ok(r) => {
+                                let mut l = log.lock().unwrap();
+                                match r.verdict {
+                                    CapacityVerdict::Genuine => l.success(format!(
+                                        "Capacity test passed ({}): {} bytes verified across {} points.",
+                                        r.mode,
+                                        r.bytes_verified,
+                                        r.tested_offsets.len()
+                                    )),
+                                    CapacityVerdict::Counterfeit => l.error(format!(
+                                        "COUNTERFEIT media: {}",
+                                        r.error.as_deref().unwrap_or("the advertised capacity is not real")
+                                    )),
+                                    CapacityVerdict::Corrupt => l.error(format!(
+                                        "CORRUPT media: {}",
+                                        r.error.as_deref().unwrap_or("the card changed the data")
+                                    )),
+                                    CapacityVerdict::Inconclusive => l.warn(format!(
+                                        "Capacity test INCONCLUSIVE: {} Close programs using the drive and retry.",
+                                        r.error.as_deref().unwrap_or("the test could not complete")
+                                    )),
                                 }
-                                Err(e) => log.lock().unwrap().error(e.to_string()),
                             }
-                        });
-                    }
+                            Err(e) => log.lock().unwrap().error(e.to_string()),
+                        }
+                    });
                 }
             }
             E::OnListViewClick | E::OnListViewDoubleClick => {

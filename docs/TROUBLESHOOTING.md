@@ -14,6 +14,8 @@ doubt, press **Save log** and read it.
 | "Access is denied" | Not elevated, or a volume is held open | Close Explorer windows for the stick and run as Administrator. |
 | Disk shows as *write-protected* | Controller latch or registry policy | Run `diskpart`, `select disk N`, `attributes disk clear readonly`. If it returns, the controller has latched read-only and only a power cycle or the vendor's tool can clear it. |
 | Disk is physically failing | I/O errors in the log | Replace the stick. No software can fix a failing controller. |
+| Capacity test says `COUNTERFEIT` but the card works | Versions before 0.4.0 wrote 8-byte blocks to the raw disk; Windows rejects anything smaller than a sector (`ERROR_INVALID_PARAMETER`), so every good card failed | Update to 0.4.0 or later. A 128 GB card legitimately reports about 116.5 GiB. Run `capacity <N> --full` for a definitive result. |
+| Capacity test says `INCONCLUSIVE` | A volume is still mounted, the card is write-protected, or the reader is busy | Close Explorer and any program using the drive, then retry. This is deliberately not reported as `COUNTERFEIT`. |
 
 ## Write-protected sticks
 

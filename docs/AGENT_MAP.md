@@ -69,7 +69,7 @@ Regenerate with `cargo run -p stickdoctor-cli -- agent-map --write`.
 | boot-sector-signature | `boot_sector_matches` | the partition boot sector holds the requested filesystem signature | `boot_sector_rejects_unknown_fs_name` |
 | repair-success | `is_success` | a repair succeeded only if the filesystem was read back and matched | `verification_rejects_boot_sector_failure` |
 | partition-usable | `layout_is_usable_mbr` | a created partition is a usable MBR partition | `layout_is_usable_mbr_rejects_gpt` |
-| capacity-test | `capacity_offsets` | counterfeit-capacity offsets are distinct, aligned and in bounds | `capacity_offsets_are_distinct_and_in_bounds` |
+| capacity-test | `sample_offsets` | capacity-test offsets are aligned, distinct and in bounds | `sample_offsets_are_empty_for_tiny_media` |
 
 ## Hazards
 
@@ -79,4 +79,4 @@ Regenerate with `cargo run -p stickdoctor-cli -- agent-map --write`.
 | performs irreversible writes to a raw disk | safety_check, self-elevation and user confirmation |
 | writes test patterns to the media | safety gate (removable media only) and explicit user confirmation |
 
-Counts: 17 modules, 66 annotations, 62 tests.
+Counts: 17 modules, 66 annotations, 66 tests.

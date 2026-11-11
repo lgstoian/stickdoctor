@@ -5,6 +5,63 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.0] - 2026-11-11
+
+### Fixed
+- **The capacity test reported every card as counterfeit.** `verify_capacity`
+  wrote 8-byte markers to `\\.\PhysicalDriveN`. Windows requires raw disk
+  writes to be whole-sector multiples and rejects anything smaller with
+  `ERROR_INVALID_PARAMETER` (87); the test treated that rejection as a
+  counterfeit mismatch. A genuine 128 GB card (116.5 GiB) was therefore
+  reported as fake. Raw I/O is now 64 KiB (quick) or 1 MiB (full) and
+  sector-aligned.
+- **The test could not detect the fraud it was meant to catch.** It read each
+  marker back immediately after writing it, which a wrapping controller serves
+  from the same aliased LBA. All samples are now written first, flushed, and only
+  then read back, with `FILE_FLAG_NO_BUFFERING` reads that bypass the Windows
+  cache.
+- **Volumes were never discovered or dismounted.** Two independent bugs:
+  1. `IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS` was defined as `0x00056000` instead
+     of `0x00560000` (`CTL_CODE(0x56, 0, METHOD_BUFFERED, FILE_ANY_ACCESS)`).
+     `DeviceIoControl` returned `ERROR_NOT_SUPPORTED`, so `volume_on_disk`
+     always said "not this disk" and `disk_volumes` always returned an empty
+     list.
+  2. `FindFirstVolumeW` returns paths of the form `\\?\Volume{GUID}\`, but
+     `CreateFileW` rejects the trailing backslash with
+     `ERROR_PATH_NOT_FOUND` (3).
+
+  Together they made the repair pipeline's unmount stage a no-op, hid the
+  volumes in the details pane, made the `chkdsk` button claim there was no drive
+  letter, and made raw writes fail with `ERROR_ACCESS_DENIED` on a mounted card.
+  The control code is corrected and asserted in a test; handle-opening call
+  sites trim the slash, while `GetVolumeInformationW` and
+  `GetVolumePathNamesForVolumeNameW` keep it.
+- **Raw writes ran against a mounted volume.** The capacity test now locks and
+  dismounts the volumes first and reopens them afterwards.
+- **A write error was always reported as counterfeit.** Access denied,
+  write-protect, sharing/lock violations and device I/O errors now produce
+  `INCONCLUSIVE` with the Win32 message; only a verified pattern mismatch is a
+  counterfeit verdict. A data change at the correct offset is reported as
+  `CORRUPT` (failing flash) instead.
+- **A dismounted volume still blocked raw writes with `ERROR_ACCESS_DENIED`.**
+  The capacity test now holds `FSCTL_LOCK_VOLUME` for the whole I/O phase and
+  rebuilds the mount point afterwards, so the drive letter comes back without a
+  replug.
+- **Some USB readers reject `FILE_FLAG_NO_BUFFERING`.** The test retries with
+  write-through plus explicit flushes instead of failing with an internal error.
+- **Only four fixed offsets were sampled.** Quick mode now samples 128 aligned
+  blocks across the whole advertised capacity plus the power-of-two boundaries
+  (8/16/32/64 GiB...) at which fake controllers wrap.
+
+### Added
+- **`capacity <N> --full`** (CLI) and a Yes/No/Cancel prompt in the GUI: write
+  and verify every byte of the advertised capacity. The default quick mode
+  remains a seconds-long spot check.
+- `CapacityVerdict`, `CapacityTestMode`, `WrapEvidence`,
+  `verify_capacity_with_mode` and `verify_capacity_full` in the public API.
+- Test patterns carry their own absolute offset, so a write found at a different
+  offset proves an address wrap and reports the multiple of the real capacity.
+
 ## [v0.3.0] - 2026-10-31
 
 ### Added

@@ -15,7 +15,7 @@ in their owning docs and are linked, not repeated:
 | Troubleshooting | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) |
 | Agent notes | [`AGENTS.md`](AGENTS.md) |
 
-Current target version: **v0.3.0**. Substitute your release version throughout.
+Current target version: **v0.4.0**. Substitute your release version throughout.
 
 ---
 
@@ -71,7 +71,7 @@ cargo build --release
 
 **Verify resources are embedded:**
 - File properties → Details shows `File description` ("StickDoctor …"),
-  `File version` ("0.3.0"), and `Company name` ("Alexandru Stoian");
+  `File version` ("0.4.0"), and `Company name` ("Alexandru Stoian");
 - the manifest contains `requireAdministrator` (UAC elevation);
 - PE subsystem is 2 (Windows GUI, no console window);
 - embedded icon present (4617-byte ICO in `assets/`).

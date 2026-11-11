@@ -6,8 +6,8 @@
 
 use std::process::ExitCode;
 use stickdoctor_core::{
-    enumerate_disks, execute_repair, inspect_properties, new_logger, DiskCandidate, FsChoice,
-    RepairOptions,
+    enumerate_disks, execute_repair, inspect_properties, new_logger, CapacityTestMode,
+    CapacityVerdict, DiskCandidate, FsChoice, RepairOptions,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -146,29 +146,70 @@ fn cmd_capacity(args: &[String]) -> ExitCode {
     let index = match positional_index(args) {
         Some(i) => i,
         None => {
-            eprintln!("Usage: stickdoctor-cli capacity <N>");
+            eprintln!("Usage: stickdoctor-cli capacity <N> [--quick|--full]");
             return ExitCode::FAILURE;
         }
     };
+    let mode = if args.iter().any(|a| a == "--full") {
+        CapacityTestMode::Full
+    } else {
+        CapacityTestMode::Quick
+    };
     println!(
-        "Testing capacity of PhysicalDrive{} (writes test data)...",
-        index
+        "Testing capacity of PhysicalDrive{} ({} test; writes test data)...",
+        index, mode
     );
+    println!("WARNING: this destroys the volume contents. Back up first.");
     let log = stickdoctor_core::new_logger();
-    match stickdoctor_core::verify_capacity(index, &log) {
+    match stickdoctor_core::verify_capacity_with_mode(index, mode, &log) {
         Ok(r) => {
-            if r.genuine {
-                println!(
-                    "Result: GENUINE - all {} test offsets passed.",
-                    r.tested_offsets.len()
-                );
-                ExitCode::SUCCESS
-            } else {
-                println!(
-                    "Result: COUNTERFEIT - first failure at offset {}.",
-                    r.first_failure.unwrap_or(0)
-                );
-                ExitCode::FAILURE
+            if let Ok(l) = log.lock() {
+                let rendered = l.render();
+                if !rendered.is_empty() {
+                    println!("\n{}\n", rendered);
+                }
+            }
+            match r.verdict {
+                CapacityVerdict::Genuine => {
+                    println!(
+                        "Result: GENUINE - {} bytes verified at {} sample points.",
+                        r.bytes_verified,
+                        r.tested_offsets.len()
+                    );
+                    ExitCode::SUCCESS
+                }
+                CapacityVerdict::Counterfeit => {
+                    println!(
+                        "Result: COUNTERFEIT - {}",
+                        r.error
+                            .as_deref()
+                            .unwrap_or("the advertised capacity is not real")
+                    );
+                    if let Some(w) = r.wrap_evidence {
+                        println!(
+                            "  Wrap evidence: the block at offset {} was written for offset {} (the real capacity divides {} bytes).",
+                            w.read_offset, w.written_at, w.capacity_multiple
+                        );
+                    } else if let Some(off) = r.first_failure {
+                        println!("  First failure at offset {}.", off);
+                    }
+                    ExitCode::FAILURE
+                }
+                CapacityVerdict::Corrupt => {
+                    println!(
+                        "Result: CORRUPT - {}",
+                        r.error.as_deref().unwrap_or("the media changed the data")
+                    );
+                    ExitCode::FAILURE
+                }
+                CapacityVerdict::Inconclusive => {
+                    println!(
+                        "Result: INCONCLUSIVE - {}",
+                        r.error.as_deref().unwrap_or("the test could not complete")
+                    );
+                    println!("  This is not proof of a fake card. Close programs using the drive and retry.");
+                    ExitCode::FAILURE
+                }
             }
         }
         Err(e) => {
@@ -233,6 +274,7 @@ fn print_help() {
          Usage:\n  \
          stickdoctor-cli [list] [--json]      List physical disks\n  \
          stickdoctor-cli agent-map [--json]   Agent breadcrumbs (machine-readable)\n  \
+         stickdoctor-cli capacity <N> [options]  Counterfeit-capacity test (WRITES!)\n  \
          stickdoctor-cli repair <N> [fs] [label] [options]\n\n\
          Arguments:\n  \
          <N>       Physical drive number (see `list`)\n  \
@@ -243,9 +285,12 @@ fn print_help() {
          --yes             Skip the confirmation prompt\n  \
          --zero            Zero the first/last 1 MiB before rebuilding\n  \
          --rebuild-only    Only rebuild the partition table, do not format\n  \
-         --dry-run         Show what would happen, change nothing\n\n\
+         --dry-run         Show what would happen, change nothing\n  \
+         --full            Capacity test: write and verify the whole card (slow)\n  \
+         --quick           Capacity test: sample 128 points (default, fast)\n\n\
          Examples:\n  \
          stickdoctor-cli list --json\n  \
+         stickdoctor-cli capacity 3 --full\n  \
          stickdoctor-cli repair 3 fat32 MYSTICK\n  \
          stickdoctor-cli repair 3 exfat MYSTICK --yes\n",
         VERSION
