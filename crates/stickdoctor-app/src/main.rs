@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use stickdoctor_core::{
     clear_read_only, enumerate_disks, execute_repair_with_progress, format_progress, new_logger,
     run_chkdsk, scan_lost_partitions, verify_capacity_with_mode, CapacityTestMode, CapacityVerdict,
-    DiskCandidate, FsChoice, RepairOptions, SharedLog,
+    DiskCandidate, FsChoice, LogLevel, RepairOptions, SharedLog,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -598,34 +598,74 @@ fn build_ui() {
                     let mode = match choice {
                         nwg::MessageChoice::Yes => CapacityTestMode::Full,
                         nwg::MessageChoice::No => CapacityTestMode::Quick,
-                        _ => return,
+                        _ => {
+                            push_log(&st, LogLevel::Info, "Capacity test cancelled.");
+                            *st.stage_slot.lock().unwrap() = "Capacity test cancelled.".to_string();
+                            sender.notice();
+                            return;
+                        }
                     };
+                    push_log(
+                        &st,
+                        LogLevel::Info,
+                        format!("Capacity test requested ({mode} mode)."),
+                    );
+                    let st_result = st.clone();
                     run_tool(st.clone(), sender, "capacity", true, move |idx, log| {
-                        match verify_capacity_with_mode(idx, mode, log) {
+                        let status = match verify_capacity_with_mode(idx, mode, log) {
                             Ok(r) => {
                                 let mut l = log.lock().unwrap();
-                                match r.verdict {
-                                    CapacityVerdict::Genuine => l.success(format!(
-                                        "Capacity test passed ({}): {} bytes verified across {} points.",
-                                        r.mode,
-                                        r.bytes_verified,
-                                        r.tested_offsets.len()
-                                    )),
-                                    CapacityVerdict::Counterfeit => l.error(format!(
-                                        "COUNTERFEIT media: {}",
-                                        r.error.as_deref().unwrap_or("the advertised capacity is not real")
-                                    )),
-                                    CapacityVerdict::Corrupt => l.error(format!(
-                                        "CORRUPT media: {}",
-                                        r.error.as_deref().unwrap_or("the card changed the data")
-                                    )),
-                                    CapacityVerdict::Inconclusive => l.warn(format!(
-                                        "Capacity test INCONCLUSIVE: {} Close programs using the drive and retry.",
-                                        r.error.as_deref().unwrap_or("the test could not complete")
-                                    )),
-                                }
+                                let status = match r.verdict {
+                                    CapacityVerdict::Genuine => {
+                                        let text = format!(
+                                            "Capacity: GENUINE ({} bytes verified).",
+                                            r.bytes_verified
+                                        );
+                                        l.success(format!(
+                                            "Capacity test passed ({}): {} bytes verified across {} points.",
+                                            r.mode,
+                                            r.bytes_verified,
+                                            r.tested_offsets.len()
+                                        ));
+                                        text
+                                    }
+                                    CapacityVerdict::Counterfeit => {
+                                        l.error(format!(
+                                            "COUNTERFEIT media: {}",
+                                            r.error
+                                                .as_deref()
+                                                .unwrap_or("the advertised capacity is not real")
+                                        ));
+                                        "Capacity: COUNTERFEIT - see log.".to_string()
+                                    }
+                                    CapacityVerdict::Corrupt => {
+                                        l.error(format!(
+                                            "CORRUPT media: {}",
+                                            r.error
+                                                .as_deref()
+                                                .unwrap_or("the card changed the data")
+                                        ));
+                                        "Capacity: CORRUPT - see log.".to_string()
+                                    }
+                                    CapacityVerdict::Inconclusive => {
+                                        l.warn(format!(
+                                            "Capacity test INCONCLUSIVE: {} Close programs using the drive and retry.",
+                                            r.error.as_deref().unwrap_or("the test could not complete")
+                                        ));
+                                        "Capacity: INCONCLUSIVE - see log.".to_string()
+                                    }
+                                };
+                                status
                             }
-                            Err(e) => log.lock().unwrap().error(e.to_string()),
+                            Err(e) => {
+                                log.lock().unwrap().error(e.to_string());
+                                format!("Capacity test failed: {}", e)
+                            }
+                        };
+                        // The status bar is visible even when the log pane is
+                        // below the bottom of a small screen.
+                        if let Ok(mut s) = st_result.stage_slot.lock() {
+                            *s = status;
                         }
                     });
                 }
@@ -714,26 +754,44 @@ where
 {
     let candidate = match selected_candidate(&state) {
         Some(c) => c,
-        None => return,
+        None => {
+            let message = "Select a disk first, then press the tool button again.";
+            push_log(&state, LogLevel::Warn, message);
+            *state.stage_slot.lock().unwrap() = message.to_string();
+            sender.notice();
+            return;
+        }
     };
     // Never run a tool while a repair holds the disk and the volume locks.
     if state.busy.load(Ordering::Relaxed) {
-        *state.stage_slot.lock().unwrap() = "A repair is already running.".to_string();
+        let message = "A repair is already running; wait for it to finish.";
+        push_log(&state, LogLevel::Warn, message);
+        *state.stage_slot.lock().unwrap() = message.to_string();
         sender.notice();
         return;
     }
     if require_safe && !candidate.can_repair() {
-        *state.stage_slot.lock().unwrap() =
-            format!("Refused {}: {}", name, candidate.safety.long_label());
+        let message = format!("Refused {}: {}", name, candidate.safety.long_label());
+        push_log(&state, LogLevel::Error, message.clone());
+        *state.stage_slot.lock().unwrap() = message;
         sender.notice();
         return;
     }
     let index = match candidate.device.drive_index {
         Some(i) => i,
-        None => return,
+        None => {
+            let message = "Cannot determine the disk number. Run StickDoctor as Administrator.";
+            push_log(&state, LogLevel::Error, message);
+            *state.stage_slot.lock().unwrap() = message.to_string();
+            sender.notice();
+            return;
+        }
     };
     let label = name.to_string();
     let log = new_logger();
+    if let Ok(mut l) = log.lock() {
+        l.info(format!("Running {} on PhysicalDrive{}...", label, index));
+    }
     *state.log_slot.lock().unwrap() = Some(log.clone());
     *state.stage_slot.lock().unwrap() = format!("Running {}...", label);
     sender.notice();
@@ -741,6 +799,16 @@ where
         f(index, &log);
         sender.notice();
     });
+}
+
+/// Put a line in the visible log even when a tool refuses to start. The status
+/// bar alone is easy to miss.
+fn push_log(state: &State, level: LogLevel, message: impl Into<String>) {
+    let mut slot = state.log_slot.lock().unwrap();
+    let log = slot.get_or_insert_with(new_logger).clone();
+    if let Ok(mut l) = log.lock() {
+        l.log(level, message);
+    };
 }
 
 /// The candidate the list selection points at (falling back to the first row).

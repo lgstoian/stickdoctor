@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.4.1] - 2026-11-11
+
+### Fixed
+- **Tool buttons could appear to do nothing.** `run_tool` only set the status bar
+  and returned when no disk was selected, a repair was running, the disk number
+  was unknown, or the safety gate refused the tool. The reason is now written to
+  the visible log as well as the status bar, and the capacity dialog logs the
+  requested mode or its cancellation.
+- **The repository-root `StickDoctor.exe` was still v0.2.2.** The fixed GUI and
+  CLI are rebuilt and copied to the root and to `release/` as v0.4.1.
+
 ## [v0.4.0] - 2026-11-11
 
 ### Fixed
