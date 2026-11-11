@@ -210,6 +210,11 @@ fn cmd_capacity(args: &[String]) -> ExitCode {
                     println!("  This is not proof of a fake card. Close programs using the drive and retry.");
                     ExitCode::FAILURE
                 }
+                CapacityVerdict::Cancelled => {
+                    println!("Result: CANCELLED - the card may be partially overwritten.");
+                    println!("  Run `repair` before using it.");
+                    ExitCode::FAILURE
+                }
             }
         }
         Err(e) => {

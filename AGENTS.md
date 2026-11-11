@@ -167,6 +167,8 @@ the boot sector proves the format landed.
 | FFI struct sizes asserted in tests | `VOLUME_DISK_EXTENTS` and friends are ABI; a wrong layout corrupts memory. |
 | Capacity test writes all samples before reading any back | A fake that wraps addresses returns the last write at the same LBA; an immediate write/read-back can never detect it. Cache-bypassing reads (`FILE_FLAG_NO_BUFFERING`) and a flush are mandatory. |
 | Capacity I/O is sector-aligned and block-sized | `WriteFile` on `\\.\PhysicalDriveN` rejects anything smaller than a sector (`ERROR_INVALID_PARAMETER`). The old 8-byte probe marked every card counterfeit. |
+| Long tools poll `Notice` every 300 ms | The core only logs; the GUI renders on `Notice`. Without a poller, a two-hour full test looks frozen at `Running capacity...`. |
+| Capacity test polls a cancel flag between blocks | A full test can take hours; closing the window is not a safe cancel path. The button becomes *Cancel capacity test* while it runs. |
 
 ## Tools beyond "repair and format"
 
@@ -177,7 +179,7 @@ the boot sector proves the format landed.
 | `scan_lost_partitions` | TestDisk-style search for orphaned boot sectors. |
 | `clear_read_only` | Disk **and** volume level, plus registry policy detection. |
 | `run_chkdsk` | Filesystem repair when a volume is mounted. |
-| `verify_capacity` | Counterfeit / fake-capacity test: quick-mode samples 128 aligned blocks across the whole card; `verify_capacity_full` writes and verifies every byte. |
+| `verify_capacity` | Counterfeit / fake-capacity test: quick-mode samples 128 aligned blocks across the whole card; `verify_capacity_full` writes and verifies every byte. `verify_capacity_with_options` adds a progress callback and a cancel flag. |
 | `full_overwrite` | SD Association formatter style — zero the whole card. |
 | `verify_disk` | Non-destructive "is this formatted?" check. |
 
@@ -213,6 +215,8 @@ the boot sector proves the format landed.
   `pattern_roundtrips_and_identifies_its_offset` guard the capacity test: offsets
   must be 4 KiB-aligned, and a block must carry its own offset so a wrapped write
   is detected.
+- `tools::tests::cancellation_flag_is_honoured` guards the cooperative cancel
+  path; `capacity_phases_have_progress_labels` guards the UI progress labels.
 - There is no automated end-to-end test: it needs Administrator rights and a
   real stick. Manual matrix: a dd'd stick, a healthy stick, a >32 GiB stick
   (exFAT path), and a write-protected SD card.

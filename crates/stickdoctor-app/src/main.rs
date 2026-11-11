@@ -15,8 +15,8 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use stickdoctor_core::{
     clear_read_only, enumerate_disks, execute_repair_with_progress, format_progress, new_logger,
-    run_chkdsk, scan_lost_partitions, verify_capacity_with_mode, CapacityTestMode, CapacityVerdict,
-    DiskCandidate, FsChoice, LogLevel, RepairOptions, SharedLog,
+    run_chkdsk, scan_lost_partitions, verify_capacity_with_options, CapacityPhase,
+    CapacityTestMode, CapacityVerdict, DiskCandidate, FsChoice, LogLevel, RepairOptions, SharedLog,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -176,6 +176,14 @@ struct State {
     stage_slot: Arc<Mutex<String>>,
     base_pct: Arc<AtomicU8>,
     busy: Arc<AtomicBool>,
+    /// Progress of a generic tool (0-100), separate from the repair pipeline.
+    tool_pct: Arc<AtomicU8>,
+    /// Whether a tool (not a repair) is currently running.
+    tool_running: Arc<AtomicBool>,
+    /// Whether the capacity test is running, so the button can act as Cancel.
+    capacity_running: Arc<AtomicBool>,
+    /// Set by the Cancel button; polled by the capacity test between blocks.
+    capacity_cancel: Arc<AtomicBool>,
     /// Candidates produced by a background probe, waiting to be rendered.
     pending: Arc<Mutex<Option<Vec<DiskCandidate>>>>,
     /// Row currently highlighted in the list.
@@ -484,6 +492,10 @@ fn build_ui() {
         stage_slot: Arc::new(Mutex::new(String::new())),
         base_pct: Arc::new(AtomicU8::new(0)),
         busy: Arc::new(AtomicBool::new(false)),
+        tool_pct: Arc::new(AtomicU8::new(0)),
+        tool_running: Arc::new(AtomicBool::new(false)),
+        capacity_running: Arc::new(AtomicBool::new(false)),
+        capacity_cancel: Arc::new(AtomicBool::new(false)),
         pending: Arc::new(Mutex::new(None)),
         selection: Arc::new(Mutex::new(0)),
     });
@@ -586,21 +598,111 @@ fn build_ui() {
                         });
                     }
                 } else if handle == capacity_btn {
+                    // While a test runs, the same button is the cancel
+                    // control. A full test can take hours, so it must be
+                    // stoppable without killing the process mid-write.
+                    if st.capacity_running.load(Ordering::Relaxed) {
+                        st.capacity_cancel.store(true, Ordering::Relaxed);
+                        *st.stage_slot.lock().unwrap() =
+                            "Cancelling the capacity test...".to_string();
+                        status.set_text("Cancelling the capacity test...");
+                        push_log(
+                            &st,
+                            LogLevel::Warn,
+                            "Cancelling the capacity test at the next block...",
+                        );
+                        sender.notice();
+                        return;
+                    }
+                    if st.busy.load(Ordering::Relaxed) {
+                        let message = "A test or repair is already running; wait for it to finish.";
+                        push_log(&st, LogLevel::Warn, message);
+                        status.set_text(message);
+                        sender.notice();
+                        return;
+                    }
+                    let candidate = match selected_candidate(&st) {
+                        Some(c) => c,
+                        None => {
+                            nwg::modal_error_message(
+                                window_h.as_ref(),
+                                "No disk selected",
+                                "Select the card in the list first.",
+                            );
+                            status.set_text("Select a disk first.");
+                            return;
+                        }
+                    };
+                    if !candidate.can_repair() {
+                        nwg::modal_error_message(
+                            window_h.as_ref(),
+                            "Capacity test refused",
+                            candidate.safety.long_label(),
+                        );
+                        status.set_text("Capacity test refused (safety).");
+                        return;
+                    }
+
+                    let size_gib = candidate.properties.size_gib();
+                    // Full mode writes and then reads the whole card. With a
+                    // USB 2.0 reader, 15-30 MB/s is a realistic range.
+                    let hours_fast = 2.0 * size_gib * 1024.0 / (30.0 * 3600.0);
+                    let hours_slow = 2.0 * size_gib * 1024.0 / (15.0 * 3600.0);
+                    let estimate = if hours_fast < 1.0 {
+                        format!(
+                            "about {:.0}-{:.0} minutes",
+                            hours_fast * 60.0,
+                            hours_slow * 60.0
+                        )
+                    } else {
+                        format!("about {:.1}-{:.1} hours", hours_fast, hours_slow)
+                    };
+                    let content = format!(
+                        "This writes test patterns and destroys the card's contents.\n\n\
+                         NO = quick check: sample 128 points across the card (seconds).\n\
+                         YES = full test: write and verify all {:.1} GiB ({estimate} on this reader).\n\
+                         CANCEL = abort.\n\n\
+                         Either mode overwrites filesystem data; run REPAIR STICK afterwards.",
+                        size_gib
+                    );
                     let choice = nwg::modal_message(
                         window_h.as_ref(),
                         &nwg::MessageParams {
                             title: "Capacity test writes data",
-                            content: "This writes test patterns to the media and destroys its contents.\n\nYES = full test: write and verify the whole card (can take an hour).\nNO = quick check: sample 128 points across the card (seconds).\n\nRun the FULL test?",
+                            content: &content,
                             buttons: nwg::MessageButtons::YesNoCancel,
                             icons: nwg::MessageIcons::Warning,
                         },
                     );
                     let mode = match choice {
-                        nwg::MessageChoice::Yes => CapacityTestMode::Full,
+                        nwg::MessageChoice::Yes => {
+                            let confirm = nwg::modal_message(
+                                window_h.as_ref(),
+                                &nwg::MessageParams {
+                                    title: "Full capacity test",
+                                    content: &format!(
+                                        "Full test: write and verify {:.1} GiB.\n\n\
+                                         Expected: {estimate} on this USB reader.\n\
+                                         The card will need to be formatted afterwards.\n\n\
+                                         Start the FULL test?",
+                                        size_gib
+                                    ),
+                                    buttons: nwg::MessageButtons::YesNo,
+                                    icons: nwg::MessageIcons::Warning,
+                                },
+                            );
+                            if confirm != nwg::MessageChoice::Yes {
+                                push_log(&st, LogLevel::Info, "Full capacity test cancelled.");
+                                status.set_text("Capacity test cancelled.");
+                                sender.notice();
+                                return;
+                            }
+                            CapacityTestMode::Full
+                        }
                         nwg::MessageChoice::No => CapacityTestMode::Quick,
                         _ => {
                             push_log(&st, LogLevel::Info, "Capacity test cancelled.");
-                            *st.stage_slot.lock().unwrap() = "Capacity test cancelled.".to_string();
+                            status.set_text("Capacity test cancelled.");
                             sender.notice();
                             return;
                         }
@@ -610,24 +712,50 @@ fn build_ui() {
                         LogLevel::Info,
                         format!("Capacity test requested ({mode} mode)."),
                     );
+                    st.capacity_cancel.store(false, Ordering::Relaxed);
+                    capacity_btn.set_text("Cancel capacity test");
+
+                    let st_worker = st.clone();
+                    let st_progress = st.clone();
                     let st_result = st.clone();
+                    let cancel = st.capacity_cancel.clone();
+                    let on_progress = move |phase: CapacityPhase, pct: u8| {
+                        st_progress.tool_pct.store(pct, Ordering::Relaxed);
+                        if let Ok(mut s) = st_progress.stage_slot.lock() {
+                            *s = match phase {
+                                CapacityPhase::Writing => {
+                                    format!("Capacity: writing {pct}%")
+                                }
+                                CapacityPhase::Verifying => {
+                                    format!("Capacity: verifying {pct}%")
+                                }
+                            };
+                        }
+                    };
                     run_tool(st.clone(), sender, "capacity", true, move |idx, log| {
-                        let status = match verify_capacity_with_mode(idx, mode, log) {
+                        st_worker.capacity_running.store(true, Ordering::Relaxed);
+                        st_worker.tool_pct.store(0, Ordering::Relaxed);
+                        let status = match verify_capacity_with_options(
+                            idx,
+                            mode,
+                            Some(&cancel),
+                            &on_progress,
+                            log,
+                        ) {
                             Ok(r) => {
                                 let mut l = log.lock().unwrap();
-                                let status = match r.verdict {
+                                match r.verdict {
                                     CapacityVerdict::Genuine => {
-                                        let text = format!(
-                                            "Capacity: GENUINE ({} bytes verified).",
-                                            r.bytes_verified
-                                        );
                                         l.success(format!(
                                             "Capacity test passed ({}): {} bytes verified across {} points.",
                                             r.mode,
                                             r.bytes_verified,
                                             r.tested_offsets.len()
                                         ));
-                                        text
+                                        format!(
+                                            "Capacity: GENUINE ({} bytes verified). Run REPAIR STICK.",
+                                            r.bytes_verified
+                                        )
                                     }
                                     CapacityVerdict::Counterfeit => {
                                         l.error(format!(
@@ -654,19 +782,30 @@ fn build_ui() {
                                         ));
                                         "Capacity: INCONCLUSIVE - see log.".to_string()
                                     }
-                                };
-                                status
+                                    CapacityVerdict::Cancelled => {
+                                        l.warn(
+                                            "Capacity test cancelled; the card may be partially overwritten.",
+                                        );
+                                        "Capacity: CANCELLED - the card needs repair.".to_string()
+                                    }
+                                }
                             }
                             Err(e) => {
                                 log.lock().unwrap().error(e.to_string());
                                 format!("Capacity test failed: {}", e)
                             }
                         };
+                        st_result.capacity_running.store(false, Ordering::Relaxed);
+                        st_result.capacity_cancel.store(false, Ordering::Relaxed);
+                        st_result.tool_pct.store(0, Ordering::Relaxed);
                         // The status bar is visible even when the log pane is
                         // below the bottom of a small screen.
                         if let Ok(mut s) = st_result.stage_slot.lock() {
                             *s = status;
                         }
+                        // The volume may have been remounted (or left RAW), so
+                        // refresh the table for the next action.
+                        start_refresh(st_result.clone(), sender);
                     });
                 }
             }
@@ -696,19 +835,48 @@ fn build_ui() {
                 if !stage.is_empty() {
                     status.set_text(&stage);
                 }
-                let base = base_pct.load(Ordering::Relaxed) as u32;
-                let pct = if (52..88).contains(&base) {
-                    let p = format_progress() as u32;
-                    52 + p * 36 / 100
+                let busy = st.busy.load(Ordering::Relaxed);
+                repair_btn.set_enabled(!busy);
+
+                let pct = if st.tool_running.load(Ordering::Relaxed) {
+                    st.tool_pct.load(Ordering::Relaxed) as u32
                 } else {
-                    base
+                    let base = base_pct.load(Ordering::Relaxed) as u32;
+                    if (52..88).contains(&base) {
+                        let p = format_progress() as u32;
+                        52 + p * 36 / 100
+                    } else {
+                        base
+                    }
                 };
                 progress.set_pos(pct);
-                if !st.busy.load(Ordering::Relaxed) {
-                    repair_btn.set_enabled(true);
+
+                // While a capacity test runs, the same button is the cancel
+                // control. This is the only safe way to stop a two-hour test.
+                let capacity_label = if st.capacity_running.load(Ordering::Relaxed) {
+                    "Cancel capacity test"
+                } else {
+                    "Test capacity (writes!)"
+                };
+                if capacity_btn.text() != capacity_label {
+                    capacity_btn.set_text(capacity_label);
                 }
             }
             E::OnWindowClose => {
+                if st.busy.load(Ordering::Relaxed) {
+                    let choice = nwg::modal_message(
+                        window_h.as_ref(),
+                        &nwg::MessageParams {
+                            title: "A test is still running",
+                            content: "Closing StickDoctor now stops the test and may leave the card partially overwritten. Close anyway?",
+                            buttons: nwg::MessageButtons::YesNo,
+                            icons: nwg::MessageIcons::Warning,
+                        },
+                    );
+                    if choice != nwg::MessageChoice::Yes {
+                        return;
+                    }
+                }
                 save_settings(&current_settings(
                     &fs_combo,
                     &label_input,
@@ -762,9 +930,10 @@ where
             return;
         }
     };
-    // Never run a tool while a repair holds the disk and the volume locks.
+    // Never run a tool while a repair or another tool holds the disk and the
+    // volume locks.
     if state.busy.load(Ordering::Relaxed) {
-        let message = "A repair is already running; wait for it to finish.";
+        let message = "A test or repair is already running; wait for it to finish.";
         push_log(&state, LogLevel::Warn, message);
         *state.stage_slot.lock().unwrap() = message.to_string();
         sender.notice();
@@ -794,10 +963,36 @@ where
     }
     *state.log_slot.lock().unwrap() = Some(log.clone());
     *state.stage_slot.lock().unwrap() = format!("Running {}...", label);
+    state.busy.store(true, Ordering::Relaxed);
+    state.tool_running.store(true, Ordering::Relaxed);
+    state.tool_pct.store(0, Ordering::Relaxed);
+    state.base_pct.store(0, Ordering::Relaxed);
     sender.notice();
+
+    // A long tool (full capacity test, full overwrite) can run for hours and
+    // does not send its own notices. Poll the shared log so the pane and the
+    // status line stay live.
+    let done = Arc::new(AtomicBool::new(false));
+    let done_poll = done.clone();
+    let poll_sender = sender;
+    let poller = std::thread::spawn(move || {
+        while !done_poll.load(Ordering::Relaxed) {
+            poll_sender.notice();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        poll_sender.notice();
+    });
+
+    let busy = state.busy.clone();
+    let tool_running = state.tool_running.clone();
+    let tool_pct = state.tool_pct.clone();
     std::thread::spawn(move || {
         f(index, &log);
-        sender.notice();
+        tool_running.store(false, Ordering::Relaxed);
+        tool_pct.store(0, Ordering::Relaxed);
+        busy.store(false, Ordering::Relaxed);
+        done.store(true, Ordering::Relaxed);
+        let _ = poller.join();
     });
 }
 

@@ -16,6 +16,7 @@ doubt, press **Save log** and read it.
 | Disk is physically failing | I/O errors in the log | Replace the stick. No software can fix a failing controller. |
 | Capacity test says `COUNTERFEIT` but the card works | Versions before 0.4.0 wrote 8-byte blocks to the raw disk; Windows rejects anything smaller than a sector (`ERROR_INVALID_PARAMETER`), so every good card failed | Update to 0.4.0 or later. A 128 GB card legitimately reports about 116.5 GiB. Run `capacity <N> --full` for a definitive result. |
 | Capacity test says `INCONCLUSIVE` | A volume is still mounted, the card is write-protected, or the reader is busy | Close Explorer and any program using the drive, then retry. This is deliberately not reported as `COUNTERFEIT`. |
+| Capacity test appears frozen at `Running capacity...` | You selected the full test; it writes and then reads the whole card (2-4 hours on a USB 2.0 reader for 116 GiB) | Watch the status bar/progress bar. In 0.5.0+ the button becomes *Cancel capacity test*. A quick check takes seconds; choose **No** in the first dialog. |
 
 ## Write-protected sticks
 

@@ -5,7 +5,7 @@
 
 ![CI](https://github.com/lgstoian/stickdoctor/actions/workflows/ci.yml/badge.svg)
 ![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)
-![Version](https://img.shields.io/badge/version-0.4.1-blue)
+![Version](https://img.shields.io/badge/version-0.5.0-blue)
 
 ---
 
@@ -46,6 +46,8 @@ normal FAT32/exFAT/NTFS volume, and then **proves the result works**.
   filesystem signature is checked, so "formatted" actually means "formatted".
 - **Post-format read/write test** so "usable" is proven, not assumed.
 - **Live progress bar** driven by the formatter's own percentage callback.
+- **Live capacity-test progress with Cancel** — a full 116 GiB test shows
+  `writing 13%` / `verifying 45%` and can be stopped without killing the app.
 - **Rebuild partition table only** mode for advanced users.
 - **Drive-letter fallback** if Windows does not assign one.
 - **Settings are remembered** in `%APPDATA%\StickDoctor\config.json`.

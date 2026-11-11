@@ -5,6 +5,32 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.5.0] - 2026-11-11
+
+### Added
+- **Live capacity-test progress.** The status bar and progress bar show
+  `writing 13%` / `verifying 45%`, and the log refreshes every 300 ms during
+  any tool, so a multi-hour full test no longer looks frozen.
+- **Cancel a running capacity test.** While it runs, the tool button becomes
+  *Cancel capacity test*. The test stops at the next block, flushes, releases
+  the volume lock and remounts the volume.
+- **Full-test confirmation with a time estimate.** The full test shows the card
+  size and an expected 15-30 MB/s range (for example about 2.2-4.4 hours for
+  116.5 GiB) before starting.
+- **Close confirmation** while a test or repair is running, so the window cannot
+  be closed accidentally in the middle of a full write.
+- `verify_capacity_with_options` accepts a progress callback and an `AtomicBool`
+  cancel flag; `CapacityVerdict::Cancelled` reports a stopped test.
+
+### Changed
+- The capacity dialog now spells out quick vs full and reminds the user that
+  either mode overwrites filesystem data; the status bar says to run
+  `REPAIR STICK` afterwards.
+
+### Fixed
+- Long tools appeared to hang because the GUI refreshed only when the tool
+  finished. A poller now refreshes the log and status while the tool runs.
+
 ## [v0.4.1] - 2026-11-11
 
 ### Fixed

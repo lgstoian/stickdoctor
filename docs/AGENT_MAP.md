@@ -79,4 +79,4 @@ Regenerate with `cargo run -p stickdoctor-cli -- agent-map --write`.
 | performs irreversible writes to a raw disk | safety_check, self-elevation and user confirmation |
 | writes test patterns to the media | safety gate (removable media only) and explicit user confirmation |
 
-Counts: 17 modules, 66 annotations, 66 tests.
+Counts: 17 modules, 66 annotations, 68 tests.

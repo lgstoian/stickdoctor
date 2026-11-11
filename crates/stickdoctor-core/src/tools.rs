@@ -13,6 +13,7 @@
 
 use crate::error::{Error, Result};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_INVALID_FUNCTION,
     ERROR_INVALID_PARAMETER, ERROR_IO_DEVICE, ERROR_LOCK_VIOLATION, ERROR_NOT_READY,
@@ -249,6 +250,26 @@ impl std::fmt::Display for CapacityTestMode {
     }
 }
 
+/// Which half of the capacity test is running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapacityPhase {
+    Writing,
+    Verifying,
+}
+
+impl std::fmt::Display for CapacityPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CapacityPhase::Writing => write!(f, "writing"),
+            CapacityPhase::Verifying => write!(f, "verifying"),
+        }
+    }
+}
+
+/// Live progress callback: phase and percent (0-100). The GUI uses it to move
+/// the progress bar and the status line during a test that can take hours.
+pub type CapacityProgressCallback = dyn Fn(CapacityPhase, u8) + Send + Sync;
+
 /// What the capacity test concluded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapacityVerdict {
@@ -263,6 +284,8 @@ pub enum CapacityVerdict {
     /// The test could not complete (write-protected, access denied, I/O error).
     /// This is **not** a counterfeit verdict.
     Inconclusive,
+    /// The user stopped the test. The card may be partially overwritten.
+    Cancelled,
 }
 
 impl CapacityVerdict {
@@ -276,6 +299,7 @@ impl CapacityVerdict {
             CapacityVerdict::Counterfeit => "COUNTERFEIT",
             CapacityVerdict::Corrupt => "CORRUPT",
             CapacityVerdict::Inconclusive => "INCONCLUSIVE",
+            CapacityVerdict::Cancelled => "CANCELLED",
         }
     }
 }
@@ -610,23 +634,59 @@ pub fn verify_capacity_full(index: u32, log: &crate::SharedLog) -> Result<Capaci
     verify_capacity_with_mode(index, CapacityTestMode::Full, log)
 }
 
+fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel
+        .map(|flag| flag.load(Ordering::Relaxed))
+        .unwrap_or(false)
+}
+
+fn cancelled_report(mode: CapacityTestMode) -> CapacityReport {
+    CapacityReport {
+        verdict: CapacityVerdict::Cancelled,
+        genuine: false,
+        first_failure: None,
+        tested_offsets: Vec::new(),
+        bytes_verified: 0,
+        mode,
+        error: Some("cancelled by the user".into()),
+        wrap_evidence: None,
+    }
+}
+
 /// Run the counterfeit-capacity test in the requested mode.
 pub fn verify_capacity_with_mode(
     index: u32,
     mode: CapacityTestMode,
     log: &crate::SharedLog,
 ) -> Result<CapacityReport> {
-    match verify_capacity_once(index, mode, log, true) {
+    verify_capacity_with_options(index, mode, None, &|_, _| {}, log)
+}
+
+/// Run the capacity test with live progress and cooperative cancellation.
+///
+/// `cancel` is polled between blocks. `on_progress` receives the phase and a
+/// percentage so a UI can move a progress bar during a multi-hour full test.
+pub fn verify_capacity_with_options(
+    index: u32,
+    mode: CapacityTestMode,
+    cancel: Option<&AtomicBool>,
+    on_progress: &CapacityProgressCallback,
+    log: &crate::SharedLog,
+) -> Result<CapacityReport> {
+    match verify_capacity_once(index, mode, log, true, cancel, on_progress) {
         Err(Error::Internal(msg)) if msg.contains("ERROR_INVALID_PARAMETER") => {
             // Some USB bridges accept FILE_FLAG_NO_BUFFERING on open but reject
             // the aligned I/O. Retry with write-through and explicit flushes
             // rather than reporting an internal error.
+            if is_cancelled(cancel) {
+                return Ok(cancelled_report(mode));
+            }
             if let Ok(mut l) = log.lock() {
                 l.warn(
                     "The reader rejected no-buffering I/O; retrying with write-through and explicit flushes.",
                 );
             }
-            verify_capacity_once(index, mode, log, false)
+            verify_capacity_once(index, mode, log, false, cancel, on_progress)
         }
         other => other,
     }
@@ -637,6 +697,8 @@ fn verify_capacity_once(
     mode: CapacityTestMode,
     log: &crate::SharedLog,
     no_buffering: bool,
+    cancel: Option<&AtomicBool>,
+    on_progress: &CapacityProgressCallback,
 ) -> Result<CapacityReport> {
     crate::safety::ensure_safe_for_tool(index)?;
     let size = crate::props::inspect_properties(index)?.size_bytes;
@@ -738,7 +800,13 @@ fn verify_capacity_once(
     // ---- Write pass: every sample first, so a wrapped write has a chance to
     // clobber a block that was written earlier.
     let mut last_pct = 0u8;
+    on_progress(CapacityPhase::Writing, 0);
     for (i, &off) in offsets.iter().enumerate() {
+        if is_cancelled(cancel) {
+            error = Some("cancelled by the user".into());
+            verdict = CapacityVerdict::Cancelled;
+            break;
+        }
         fill_pattern(expect.as_mut_slice(), off);
         if let Err(code) = write_capacity_block(handle, expect.as_ptr(), block as u32, off) {
             if code == ERROR_INVALID_PARAMETER {
@@ -761,10 +829,11 @@ fn verify_capacity_once(
         }
         tested.push(off);
 
-        if mode == CapacityTestMode::Full {
-            let pct = ((i + 1) as u64 * 100 / offsets.len() as u64) as u8;
-            if pct >= last_pct + 2 {
-                last_pct = pct;
+        let pct = ((i + 1) as u64 * 100 / offsets.len() as u64) as u8;
+        if pct >= last_pct + 2 || i + 1 == offsets.len() {
+            last_pct = pct;
+            on_progress(CapacityPhase::Writing, pct);
+            if mode == CapacityTestMode::Full {
                 if let Ok(mut l) = log.lock() {
                     l.info(format!("Writing test data: {pct}%"));
                 }
@@ -773,21 +842,35 @@ fn verify_capacity_once(
     }
 
     // Flush before reading: with a write-back cache the data may not be on the
-    // media yet, and then the read would only prove that RAM works.
-    if verdict == CapacityVerdict::Genuine && unsafe { FlushFileBuffers(handle) } == 0 {
+    // media yet, and then the read would only prove that RAM works. A cancelled
+    // test is flushed too, so the card is left in a defined state.
+    if !tested.is_empty()
+        && matches!(
+            verdict,
+            CapacityVerdict::Genuine | CapacityVerdict::Cancelled
+        )
+        && unsafe { FlushFileBuffers(handle) } == 0
+    {
         let code = unsafe { GetLastError() };
-        error = Some(capacity_io_message(
-            "Flush",
-            *offsets.last().unwrap_or(&0),
-            code,
-        ));
-        verdict = CapacityVerdict::Inconclusive;
+        let message = capacity_io_message("Flush", *offsets.last().unwrap_or(&0), code);
+        if verdict == CapacityVerdict::Genuine {
+            error = Some(message);
+            verdict = CapacityVerdict::Inconclusive;
+        } else if let Ok(mut l) = log.lock() {
+            l.warn(format!("The flush after cancellation failed: {message}"));
+        }
     }
 
     // ---- Verify pass.
     if verdict == CapacityVerdict::Genuine {
         last_pct = 0;
+        on_progress(CapacityPhase::Verifying, 0);
         for (i, &off) in offsets.iter().enumerate() {
+            if is_cancelled(cancel) {
+                error = Some("cancelled by the user".into());
+                verdict = CapacityVerdict::Cancelled;
+                break;
+            }
             if let Err(code) = read_capacity_block(handle, read.as_mut_ptr(), block as u32, off) {
                 if code == ERROR_INVALID_PARAMETER {
                     let _ = release_raw(handle, locks, index);
@@ -836,10 +919,11 @@ fn verify_capacity_once(
             }
             bytes_verified += block;
 
-            if mode == CapacityTestMode::Full {
-                let pct = ((i + 1) as u64 * 100 / offsets.len() as u64) as u8;
-                if pct >= last_pct + 2 {
-                    last_pct = pct;
+            let pct = ((i + 1) as u64 * 100 / offsets.len() as u64) as u8;
+            if pct >= last_pct + 2 || i + 1 == offsets.len() {
+                last_pct = pct;
+                on_progress(CapacityPhase::Verifying, pct);
+                if mode == CapacityTestMode::Full {
                     if let Ok(mut l) = log.lock() {
                         l.info(format!("Verifying test data: {pct}%"));
                     }
@@ -878,6 +962,14 @@ fn verify_capacity_once(
                 "Capacity test could not complete: {} This is not a counterfeit verdict; close programs using the drive and retry.",
                 error.as_deref().unwrap_or("unknown I/O error.")
             )),
+            CapacityVerdict::Cancelled => l.warn(
+                "Capacity test cancelled. The card was partially overwritten; repair or format it before use.",
+            ),
+        }
+        if !tested.is_empty() && verdict != CapacityVerdict::Cancelled {
+            l.warn(
+                "The capacity test overwrote filesystem data. Run REPAIR STICK (or format) before using the card.",
+            );
         }
     }
 
@@ -1067,7 +1159,23 @@ mod tests {
         assert_eq!(CapacityVerdict::Counterfeit.label(), "COUNTERFEIT");
         assert_eq!(CapacityVerdict::Corrupt.label(), "CORRUPT");
         assert_eq!(CapacityVerdict::Inconclusive.label(), "INCONCLUSIVE");
+        assert_eq!(CapacityVerdict::Cancelled.label(), "CANCELLED");
         assert!(CapacityVerdict::Genuine.is_genuine());
         assert!(!CapacityVerdict::Counterfeit.is_genuine());
+    }
+
+    #[test]
+    fn cancellation_flag_is_honoured() {
+        let flag = AtomicBool::new(false);
+        assert!(!is_cancelled(Some(&flag)));
+        flag.store(true, Ordering::Relaxed);
+        assert!(is_cancelled(Some(&flag)));
+        assert!(!is_cancelled(None));
+    }
+
+    #[test]
+    fn capacity_phases_have_progress_labels() {
+        assert_eq!(CapacityPhase::Writing.to_string(), "writing");
+        assert_eq!(CapacityPhase::Verifying.to_string(), "verifying");
     }
 }
